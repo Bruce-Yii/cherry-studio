@@ -1516,6 +1516,10 @@ const AgentComposerInner = ({
 
   // Queue mode (same as chat): while the session streams, follow-ups queue here and auto-drain on idle.
   const { isFulfilled: sessionFulfilled, markSeen: markSessionSeen } = useTopicStreamStatus(sessionTopicId)
+  // Live queue scope for the async enqueue below: clearing the editor after
+  // the POST must not wipe the newly selected session's draft.
+  const queueScopeRef = useRef(sessionTopicId)
+  queueScopeRef.current = sessionTopicId
   const {
     items: queuedFollowups,
     enqueue: enqueueFollowup,
@@ -1580,8 +1584,9 @@ const AgentComposerInner = ({
       // the dock lets the user steer/edit/remove items. The steer shortcut opts out of the queue and
       // falls through to the direct send below, mirroring the dock's "insert" action.
       if (isStreaming && !options?.steer) {
+        const enqueueScope = sessionTopicId
         const queued = await enqueueFollowup(draft, payload)
-        if (queued) clearCurrentDraft()
+        if (queued && queueScopeRef.current === enqueueScope) clearCurrentDraft()
         return
       }
 
@@ -1603,6 +1608,7 @@ const AgentComposerInner = ({
       model,
       sendDisabled,
       sendQueuedPayload,
+      sessionTopicId,
       t,
       workspaceWarning
     ]

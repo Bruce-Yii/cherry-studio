@@ -1020,6 +1020,10 @@ const ChatComposerInner = ({
   // follow-up rather than blocked — the main process persists it and yields/chains a continuation.
   const canSteer = isPending && !awaitingApproval
   const selectedKnowledgeBasesScopeKey = buildTopicFollowupScopeKey(scopeKey, selectedAssistantId)
+  // Live queue scope for the async enqueue below: clearing the editor after
+  // the POST must not wipe the newly selected conversation's draft.
+  const queueScopeRef = useRef(selectedKnowledgeBasesScopeKey)
+  queueScopeRef.current = selectedKnowledgeBasesScopeKey
   const assistantName = displayAssistant?.name ?? (isAssistantLoading ? t('common.loading') : selectAssistantMessage)
   const { canAddImageFile, supportedExts } = useComposerFileCapabilities({
     models: mentionedModels,
@@ -1741,8 +1745,9 @@ const ChatComposerInner = ({
       // Busy (streaming, not awaiting approval) → queue the follow-up instead of sending now. The
       // dock lets the user steer/edit/remove it; the head auto-drains when the turn goes idle.
       if (canSteer) {
+        const enqueueScope = selectedKnowledgeBasesScopeKey
         const queued = await enqueueFollowup(draft, payload)
-        if (queued) clearCurrentDraft()
+        if (queued && queueScopeRef.current === enqueueScope) clearCurrentDraft()
         return
       }
 
@@ -1773,6 +1778,7 @@ const ChatComposerInner = ({
       missingSelectedModelMessage,
       runtimeModel,
       runtimeModelPending,
+      selectedKnowledgeBasesScopeKey,
       selectedModelForMissingAssistantDefault,
       selectedModelForUnlinkedHome,
       sendDisabled,
