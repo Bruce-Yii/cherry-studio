@@ -18,6 +18,7 @@ const {
   mockGetProviderApiKeys,
   mockGetProviderAuthConfig,
   mockHasPairedDeviceToken,
+  mockIsInternalAgentRequest,
   mockIsInternalRequestToken,
   mockListProviderModels,
   mockListProviders,
@@ -29,6 +30,7 @@ const {
   mockGetProviderApiKeys: vi.fn(),
   mockGetProviderAuthConfig: vi.fn(),
   mockHasPairedDeviceToken: vi.fn(),
+  mockIsInternalAgentRequest: vi.fn(() => false),
   mockIsInternalRequestToken: vi.fn((candidate: string | undefined) => candidate === 'internal-request-token'),
   mockListProviderModels: vi.fn(),
   mockListProviders: vi.fn(),
@@ -57,7 +59,11 @@ vi.mock('@application', async () => {
   const { MockMainPreferenceServiceExport } = await import('@test-mocks/main/PreferenceService')
   const overrides = {
     PreferenceService: { ...MockMainPreferenceServiceExport.preferenceService, get: mockPreferenceGet },
-    ApiGatewayService: { isInternalRequestToken: mockIsInternalRequestToken, pairDevice: mockPairDevice }
+    ApiGatewayService: {
+      isInternalAgentRequest: mockIsInternalAgentRequest,
+      isInternalRequestToken: mockIsInternalRequestToken,
+      pairDevice: mockPairDevice
+    }
   }
   return mockApplicationFactory(overrides)
 })
