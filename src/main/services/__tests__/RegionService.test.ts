@@ -7,7 +7,7 @@ const CACHE_KEY = 'region.egressCountry'
 // single geolocation transport under test.
 const { netFetchMock, proxyState } = vi.hoisted(() => ({
   netFetchMock: vi.fn(),
-  proxyState: { appliedProxyKey: 'direct||' as string | null }
+  proxyState: { appliedProxyKey: 'direct||' }
 }))
 
 vi.mock('@logger', () => ({
@@ -43,7 +43,19 @@ import { MockMainCacheServiceUtils } from '@test-mocks/main/CacheService'
 
 import { regionService } from '../RegionService'
 
-const fetchResponse = (body: unknown) => ({ json: async () => body })
+const fetchResponse = (body: unknown, init: { ok?: boolean; status?: number } = {}) => ({
+  ok: init.ok ?? true,
+  status: init.status ?? 200,
+  json: async () => body
+})
+
+const createDeferred = <T>() => {
+  let resolve: (value: T | PromiseLike<T>) => void = () => {}
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
 
 describe('RegionService', () => {
   beforeEach(() => {
@@ -70,14 +82,45 @@ describe('RegionService', () => {
     await expect(regionService.isInChina()).resolves.toBe(false)
   })
 
-  it('defaults to CN when the request fails', async () => {
-    netFetchMock.mockRejectedValue(new Error('network down'))
-    await expect(regionService.getCountry()).resolves.toBe('CN')
+  it.each([
+    ['network failure', () => netFetchMock.mockRejectedValueOnce(new Error('network down'))],
+    [
+      'HTTP failure',
+      () => netFetchMock.mockResolvedValueOnce(fetchResponse({ country_code: 'US' }, { ok: false, status: 500 }))
+    ],
+    ['missing country_code', () => netFetchMock.mockResolvedValueOnce(fetchResponse({}))]
+  ])('does not treat %s as confirmed China', async (_name, arrangeFailure) => {
+    arrangeFailure()
+
+    await expect(regionService.isInChina()).resolves.toBe(false)
   })
 
-  it('defaults to CN when the response has no country_code', async () => {
-    netFetchMock.mockResolvedValue(fetchResponse({}))
+  it('does not cache the CN fallback when the request fails', async () => {
+    netFetchMock
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValueOnce(fetchResponse({ country_code: 'US' }))
+
     await expect(regionService.getCountry()).resolves.toBe('CN')
+    await expect(regionService.getCountry()).resolves.toBe('US')
+    expect(netFetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not cache the CN fallback when the response has no country_code', async () => {
+    netFetchMock.mockResolvedValueOnce(fetchResponse({})).mockResolvedValueOnce(fetchResponse({ country_code: 'US' }))
+
+    await expect(regionService.getCountry()).resolves.toBe('CN')
+    await expect(regionService.getCountry()).resolves.toBe('US')
+    expect(netFetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('treats HTTP non-ok responses as retryable failures', async () => {
+    netFetchMock
+      .mockResolvedValueOnce(fetchResponse({ country_code: 'US' }, { ok: false, status: 500 }))
+      .mockResolvedValueOnce(fetchResponse({ country_code: 'JP' }))
+
+    await expect(regionService.getCountry()).resolves.toBe('CN')
+    await expect(regionService.getCountry()).resolves.toBe('JP')
+    expect(netFetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('re-detects when the applied proxy key changes (egress may have moved)', async () => {
@@ -116,5 +159,89 @@ describe('RegionService', () => {
 
     await expect(Promise.all([first, second])).resolves.toEqual(['JP', 'JP'])
     expect(netFetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not share an in-flight detection across proxy changes', async () => {
+    const proxyA = createDeferred<ReturnType<typeof fetchResponse>>()
+    const proxyB = createDeferred<ReturnType<typeof fetchResponse>>()
+    netFetchMock.mockReturnValueOnce(proxyA.promise).mockReturnValueOnce(proxyB.promise)
+
+    proxyState.appliedProxyKey = 'proxy-a'
+    const first = regionService.getCountry()
+    proxyState.appliedProxyKey = 'proxy-b'
+    const second = regionService.getCountry()
+
+    proxyA.resolve(fetchResponse({ country_code: 'US' }))
+    proxyB.resolve(fetchResponse({ country_code: 'JP' }))
+    await expect(Promise.all([first, second])).resolves.toEqual(['US', 'JP'])
+    expect(netFetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('reuses a pending lookup when switching from proxy A to B and back to A', async () => {
+    const proxyA = createDeferred<ReturnType<typeof fetchResponse>>()
+    const proxyB = createDeferred<ReturnType<typeof fetchResponse>>()
+    netFetchMock
+      .mockReturnValueOnce(proxyA.promise)
+      .mockReturnValueOnce(proxyB.promise)
+      .mockResolvedValueOnce(fetchResponse({ country_code: 'DE' }))
+
+    proxyState.appliedProxyKey = 'proxy-a'
+    const firstA = regionService.getCountry()
+    proxyState.appliedProxyKey = 'proxy-b'
+    const firstB = regionService.getCountry()
+    proxyState.appliedProxyKey = 'proxy-a'
+    const secondA = regionService.getCountry()
+
+    proxyA.resolve(fetchResponse({ country_code: 'US' }))
+    proxyB.resolve(fetchResponse({ country_code: 'JP' }))
+
+    await expect(Promise.all([firstA, firstB, secondA])).resolves.toEqual(['US', 'JP', 'US'])
+    expect(netFetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not let a stale proxy completion overwrite the active proxy cache', async () => {
+    const proxyA = createDeferred<ReturnType<typeof fetchResponse>>()
+    const proxyB = createDeferred<ReturnType<typeof fetchResponse>>()
+    netFetchMock
+      .mockReturnValueOnce(proxyA.promise)
+      .mockReturnValueOnce(proxyB.promise)
+      .mockResolvedValueOnce(fetchResponse({ country_code: 'DE' }))
+
+    proxyState.appliedProxyKey = 'proxy-a'
+    const firstA = regionService.getCountry()
+    proxyState.appliedProxyKey = 'proxy-b'
+    const firstB = regionService.getCountry()
+
+    proxyB.resolve(fetchResponse({ country_code: 'JP' }))
+    await expect(firstB).resolves.toBe('JP')
+
+    proxyA.resolve(fetchResponse({ country_code: 'US' }))
+    await expect(firstA).resolves.toBe('US')
+
+    await expect(regionService.getCountry()).resolves.toBe('JP')
+    expect(netFetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not let stale completion clear a newer in-flight detection', async () => {
+    const proxyA = createDeferred<ReturnType<typeof fetchResponse>>()
+    const proxyB = createDeferred<ReturnType<typeof fetchResponse>>()
+    netFetchMock
+      .mockReturnValueOnce(proxyA.promise)
+      .mockReturnValueOnce(proxyB.promise)
+      .mockResolvedValueOnce(fetchResponse({ country_code: 'DE' }))
+
+    proxyState.appliedProxyKey = 'proxy-a'
+    const firstA = regionService.getCountry()
+    proxyState.appliedProxyKey = 'proxy-b'
+    const firstB = regionService.getCountry()
+
+    proxyA.resolve(fetchResponse({ country_code: 'US' }))
+    await expect(firstA).resolves.toBe('US')
+
+    const secondB = regionService.getCountry()
+    proxyB.resolve(fetchResponse({ country_code: 'JP' }))
+
+    await expect(Promise.all([firstB, secondB])).resolves.toEqual(['JP', 'JP'])
+    expect(netFetchMock).toHaveBeenCalledTimes(2)
   })
 })

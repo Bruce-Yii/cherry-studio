@@ -1,9 +1,15 @@
-import type { MessageToolApprovalInput } from '@renderer/components/chat/messages/types'
+import type { ComponentProps } from 'react'
+
+import type {
+  MessageListActions,
+  MessageListSelectAllPagination,
+  MessageStreamingLayers,
+  MessageToolApprovalInput
+} from '@renderer/components/chat/messages/types'
 import type { ConversationComposerPlacement } from '@renderer/components/composer/ConversationComposerStage'
 import type { GetAgentResponse } from '@renderer/types/agent'
 import type { Citation } from '@renderer/types/message'
-import type { CherryMessagePart, CherryUIMessage, ModelSnapshot } from '@shared/data/types/message'
-import type { ComponentProps } from 'react'
+import type { CherryMessagePart, CherryUIMessage } from '@shared/data/types/message'
 
 import { useAgentRightPaneActions } from './components/AgentRightPane'
 import AgentSessionMessages from './components/AgentSessionMessages'
@@ -16,12 +22,14 @@ interface AgentChatMainProps {
   messages: CherryUIMessage[]
   activeAgent: GetAgentResponse | undefined
   partsByMessageId: Record<string, CherryMessagePart[]>
+  streamingLayers: MessageStreamingLayers
   optimisticAskUserQuestionInputsByToolCallId: Record<string, unknown>
-  modelFallback?: ModelSnapshot
   isLoading: boolean
   hasOlder?: boolean
   loadOlder?: () => void
+  selectAllPagination?: MessageListSelectAllPagination
   onOpenCitationsPanel: (payload: { citations: Citation[] }) => void
+  openDiagnosticReport?: MessageListActions['openDiagnosticReport']
   deleteMessage: (messageId: string) => Promise<void>
   respondToolApproval: (input: MessageToolApprovalInput) => Promise<void>
 }
@@ -34,12 +42,14 @@ export default function AgentChatMain({
   messages,
   activeAgent,
   partsByMessageId,
+  streamingLayers,
   optimisticAskUserQuestionInputsByToolCallId,
-  modelFallback,
   isLoading,
   hasOlder,
   loadOlder,
+  selectAllPagination,
   onOpenCitationsPanel,
+  openDiagnosticReport,
   deleteMessage,
   respondToolApproval
 }: AgentChatMainProps) {
@@ -48,7 +58,7 @@ export default function AgentChatMain({
   }
 
   return (
-    <div className="translate-z-0 relative flex min-h-0 w-full flex-1 flex-col overflow-hidden">
+    <div className="relative flex min-h-0 w-full flex-1 translate-z-0 flex-col overflow-hidden">
       <div className="min-h-0 flex-1">
         <AgentSessionMessagesWithAgentRightPaneAction
           agentId={agentId}
@@ -56,12 +66,14 @@ export default function AgentChatMain({
           messages={messages}
           activeAgent={activeAgent}
           partsByMessageId={partsByMessageId}
+          streamingLayers={streamingLayers}
           optimisticAskUserQuestionInputsByToolCallId={optimisticAskUserQuestionInputsByToolCallId}
-          modelFallback={modelFallback}
           isLoading={isLoading}
           hasOlder={hasOlder}
           loadOlder={loadOlder}
+          selectAllPagination={selectAllPagination}
           onOpenCitationsPanel={onOpenCitationsPanel}
+          openDiagnosticReport={openDiagnosticReport}
           deleteMessage={agentId ? deleteMessage : undefined}
           respondToolApproval={agentId ? respondToolApproval : undefined}
         />
@@ -71,6 +83,21 @@ export default function AgentChatMain({
 }
 
 const AgentSessionMessagesWithAgentRightPaneAction = (props: ComponentProps<typeof AgentSessionMessages>) => {
-  const { openAgentToolFlow, openArtifactFile } = useAgentRightPaneActions()
-  return <AgentSessionMessages {...props} openAgentToolFlow={openAgentToolFlow} openArtifactFile={openArtifactFile} />
+  const {
+    canOpenAgentToolFlow,
+    canOpenArtifactFile,
+    openAgentToolFlow,
+    openArtifactFile,
+    openBrowserUrl,
+    openExternalUrl
+  } = useAgentRightPaneActions()
+  return (
+    <AgentSessionMessages
+      {...props}
+      openAgentToolFlow={canOpenAgentToolFlow ? openAgentToolFlow : undefined}
+      openArtifactFile={canOpenArtifactFile ? openArtifactFile : undefined}
+      openBrowserUrl={openBrowserUrl}
+      openExternalUrl={openExternalUrl}
+    />
+  )
 }

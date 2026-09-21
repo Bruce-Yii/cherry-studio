@@ -1,7 +1,9 @@
-import type { WebSearchProvider } from '@shared/data/preference/preferenceTypes'
 import { act, renderHook } from '@testing-library/react'
 import type * as ReactI18next from 'react-i18next'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { toast } from '@renderer/services/toast'
+import type { WebSearchProvider } from '@shared/data/preference/preferenceTypes'
 
 const { ipcRequestMock } = vi.hoisted(() => ({ ipcRequestMock: vi.fn() }))
 vi.mock('@renderer/ipc', () => ({ ipcApi: { request: ipcRequestMock } }))
@@ -40,18 +42,8 @@ const fetchProvider: WebSearchProvider = {
 }
 
 describe('useWebSearchProviderCheck', () => {
-  const toastSuccessMock = vi.fn()
-  const toastErrorMock = vi.fn()
-
   beforeEach(() => {
     vi.clearAllMocks()
-    Object.assign(window, {
-      toast: {
-        ...window.toast,
-        success: toastSuccessMock,
-        error: toastErrorMock
-      }
-    })
     ipcRequestMock.mockResolvedValue({ results: [] })
   })
 
@@ -68,7 +60,7 @@ describe('useWebSearchProviderCheck', () => {
       providerId: 'tavily',
       keywords: ['Cherry Studio']
     })
-    expect(toastSuccessMock).toHaveBeenCalledWith('settings.tool.websearch.check_success')
+    expect(toast.success).toHaveBeenCalledWith('settings.tool.websearch.check_success')
   })
 
   it('includes provider check failure details in the toast', async () => {
@@ -81,7 +73,7 @@ describe('useWebSearchProviderCheck', () => {
       await result.current.checkProvider()
     })
 
-    expect(toastErrorMock).toHaveBeenCalledWith('settings.tool.websearch.check_failed: missing API key')
+    expect(toast.error).toHaveBeenCalledWith('settings.tool.websearch.check_failed: missing API key')
   })
 
   it('disables checks for zero-config fetch provider panels', () => {

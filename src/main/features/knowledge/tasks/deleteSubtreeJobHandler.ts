@@ -1,20 +1,20 @@
 import './jobTypes'
-
 import { knowledgeBaseService } from '@data/services/KnowledgeBaseService'
 import { knowledgeItemService } from '@data/services/KnowledgeItemService'
 import { loggerService } from '@logger'
+import type { KeyedMutex } from '@main/core/concurrency/KeyedMutex'
 import type { JobHandler } from '@main/core/job/types'
 
-import type { KnowledgeLockManager } from '../KnowledgeLockManager'
+import { purgeKnowledgeSubtreeWithinLock } from '../ingestion/subtreePurge'
+import { reclaimKnowledgeIndexSpace } from '../pipeline/vectorstore/vectorCleanup'
 import { knowledgeQueueName, reportKnowledgeProgress, toKnowledgeBaseId } from '../types'
-import { cancelActiveKnowledgeSubtreeJobs, purgeKnowledgeSubtreeWithinLock } from '../utils/cleanup/subtreePurge'
-import { reclaimKnowledgeIndexSpace } from '../utils/cleanup/vectorCleanup'
 import type { KnowledgeDeleteSubtreePayload } from './jobTypes'
+import { cancelActiveKnowledgeJobs } from './utils/cancel'
 
 const logger = loggerService.withContext('Knowledge:DeleteSubtreeJobHandler')
 
 export function createDeleteSubtreeJobHandler(
-  knowledgeLockManager: KnowledgeLockManager
+  knowledgeLockManager: KeyedMutex
 ): JobHandler<KnowledgeDeleteSubtreePayload> {
   return {
     recovery: 'retry',
@@ -33,9 +33,9 @@ export function createDeleteSubtreeJobHandler(
       ctx.signal.throwIfAborted()
       logger.info('Running knowledge delete-subtree cleanup', { baseId, rootItemIds, jobId: ctx.jobId })
 
-      const deletingSubtreeItems = (
-        await knowledgeItemService.getSubtreeItems(baseId, rootItemIds, { includeRoots: true })
-      ).filter((item) => item.status === 'deleting')
+      const deletingSubtreeItems = knowledgeItemService
+        .getSubtreeItems(baseId, rootItemIds, { includeRoots: true })
+        .filter((item) => item.status === 'deleting')
       const deletingSubtreeItemIds = deletingSubtreeItems.map((item) => item.id)
       if (deletingSubtreeItemIds.length === 0) {
         reportKnowledgeProgress(ctx, 100, { stage: 'done' })
@@ -43,14 +43,18 @@ export function createDeleteSubtreeJobHandler(
       }
 
       // Stop active work touching deleting rows before removing vectors and rows.
-      await cancelActiveKnowledgeSubtreeJobs(baseId, deletingSubtreeItemIds, 'knowledge-delete-subtree', ctx.jobId)
+      await cancelActiveKnowledgeJobs(baseId, 'knowledge-delete-subtree', {
+        rootItemIds: deletingSubtreeItemIds,
+        excludeJobId: ctx.jobId,
+        onCancelTimeout: 'throw'
+      })
 
       // Cleanup is locked so no indexer can write vectors for rows being removed.
-      await knowledgeLockManager.withBaseMutationLock(baseId, async () => {
-        const base = await knowledgeBaseService.getById(baseId)
-        const subtreeItems = (
-          await knowledgeItemService.getSubtreeItems(baseId, rootItemIds, { includeRoots: true })
-        ).filter((item) => item.status === 'deleting')
+      await knowledgeLockManager.runExclusive(baseId, async () => {
+        const base = knowledgeBaseService.getById(baseId)
+        const subtreeItems = knowledgeItemService
+          .getSubtreeItems(baseId, rootItemIds, { includeRoots: true })
+          .filter((item) => item.status === 'deleting')
         await purgeKnowledgeSubtreeWithinLock(base, subtreeItems, { baseId, jobId: ctx.jobId })
         // Return the freed pages to the OS (best-effort, large deletes only). Inside the
         // lock so the VACUUM never races an indexer write on this base's index.

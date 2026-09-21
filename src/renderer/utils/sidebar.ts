@@ -1,64 +1,48 @@
 import {
-  buildTabInstanceMetadata,
-  getTabInstanceAppId,
-  getTabInstanceKey,
-  hasTabInstanceMetadataForApp
-} from '@renderer/utils/tabInstanceMetadata'
-import type { Tab } from '@shared/data/cache/cacheValueTypes'
-import type { SidebarFavorite } from '@shared/data/preference/preferenceTypes'
+  createSidebarShortcutId,
+  type SidebarFavorite,
+  type SidebarShortcutItem,
+  type SidebarShortcutTarget
+} from '@shared/data/preference/preferenceTypes'
+import { CONVERSATION_ROUTES, conversationRouteUrl } from '@shared/utils/conversationRoute'
 
 /**
  * Context passed to sidebar navigation handlers. Carries per-call state the
- * registry can't know on its own (preferences, persisted "last used" cache).
+ * registry can't know on its own (preferences).
  */
 export interface SidebarNavContext {
   defaultPaintingProvider: string
-  /** Cross-window persistent "last focused chat topic" — drives `assistants` defaultKey. */
-  lastUsedTopicId?: string | null
-  /** Cross-window persistent "last focused agent session" — drives `agents` defaultKey. */
-  lastUsedSessionId?: string | null
 }
 
 /**
- * Apps that hold navigable sub-instances (chat→topic, agent→session) carry an
- * `instanceKey`. Sidebar click then focuses the tab whose key matches the
- * "last focused" key (`defaultKey`) instead of focusing an arbitrary tab.
- * Apps without it (files / notes / paintings / …) are plain focus-or-open.
+ * Apps that hold conversations (chat→topic, agent→session) carry a
+ * `conversationRoute`: the conversation-key↔URL mapping. Which
+ * conversation a bare entry lands on is resolved by the routes' own `beforeLoad`
+ * interceptors, not here. Apps without it (files / notes / paintings / …) are
+ * plain route entries.
  */
-export interface SidebarInstanceKey {
-  /** Extract the instance key (topicId / sessionId) from an existing tab url. */
+export interface SidebarConversationRoute {
+  /** Extract the conversation key (topicId / sessionId) from an existing tab URL. */
   keyFromUrl: (url: string) => string | undefined
-  /** The instance key to target on sidebar click (cross-window "last focused"). */
-  defaultKey: (ctx: SidebarNavContext) => string | undefined
-  /** Build the tab url for an instance key (keeps dispatch app-agnostic). */
+  /** Build the tab URL for a conversation key (keeps dispatch app-agnostic). */
   urlForKey: (key: string) => string
 }
 
-export interface SidebarApp {
-  id: SidebarFavorite
+interface SidebarAppDefinition<Id extends SidebarFavorite = SidebarFavorite> {
+  id: Id
   routePrefix: string
   /** Url to open when no tab exists yet (defaults to `routePrefix`). */
   resolveUrl?: (ctx: SidebarNavContext) => string
-  /** Focus only the exact base route instead of any sub-route owned by the app. */
+  /** Highlight the sidebar entry only on the exact base route, not on sub-routes owned by the app. */
   exactRouteFocus?: boolean
-  instanceKey?: SidebarInstanceKey
+  conversationRoute?: SidebarConversationRoute
 }
 
-function getNormalConversationSearchParamFromUrl(url: string, name: string): string | undefined {
+function getConversationSearchParamFromUrl(url: string, name: string): string | undefined {
   try {
-    const params = new URL(url, 'app://x').searchParams
-    if (params.get('view') === 'message') return undefined
-    return params.get(name) ?? undefined
+    return new URL(url, 'app://x').searchParams.get(name) ?? undefined
   } catch {
     return undefined
-  }
-}
-
-function isMessageOnlyConversationUrl(url: string): boolean {
-  try {
-    return new URL(url, 'app://x').searchParams.get('view') === 'message'
-  } catch {
-    return false
   }
 }
 
@@ -66,23 +50,23 @@ function isMessageOnlyConversationUrl(url: string): boolean {
  * Single source of truth for sidebar applications.
  * Order here is the canonical sidebar order and drives preference defaults.
  */
-export const SIDEBAR_APPS: readonly SidebarApp[] = [
-  {
-    id: 'assistants',
-    routePrefix: '/app/chat',
-    instanceKey: {
-      keyFromUrl: (url) => getNormalConversationSearchParamFromUrl(url, 'topicId'),
-      defaultKey: ({ lastUsedTopicId }) => lastUsedTopicId ?? undefined,
-      urlForKey: (key) => `/app/chat?topicId=${encodeURIComponent(key)}`
-    }
-  },
+const SIDEBAR_APP_DEFINITIONS = [
   {
     id: 'agents',
     routePrefix: '/app/agents',
-    instanceKey: {
-      keyFromUrl: (url) => getNormalConversationSearchParamFromUrl(url, 'sessionId'),
-      defaultKey: ({ lastUsedSessionId }) => lastUsedSessionId ?? undefined,
-      urlForKey: (key) => `/app/agents?sessionId=${encodeURIComponent(key)}`
+    conversationRoute: {
+      keyFromUrl: (url) => getConversationSearchParamFromUrl(url, CONVERSATION_ROUTES.agent.keyParam),
+      urlForKey: (key) => conversationRouteUrl({ conversationType: 'agent', conversationId: key })
+    }
+  },
+  {
+    id: 'assistants',
+    // `routePrefix` must stay a string literal — the knowledge-manifest generator reads it
+    // with ts-morph. `conversationRoute` below carries the same path from the shared contract.
+    routePrefix: '/app/chat',
+    conversationRoute: {
+      keyFromUrl: (url) => getConversationSearchParamFromUrl(url, CONVERSATION_ROUTES.assistant.keyParam),
+      urlForKey: (key) => conversationRouteUrl({ conversationType: 'assistant', conversationId: key })
     }
   },
   {
@@ -93,10 +77,6 @@ export const SIDEBAR_APPS: readonly SidebarApp[] = [
   {
     id: 'translate',
     routePrefix: '/app/translate'
-  },
-  {
-    id: 'store',
-    routePrefix: '/app/library'
   },
   {
     id: 'mini_app',
@@ -118,22 +98,23 @@ export const SIDEBAR_APPS: readonly SidebarApp[] = [
   {
     id: 'notes',
     routePrefix: '/app/notes'
-  },
-  {
-    id: 'openclaw',
-    routePrefix: '/app/openclaw'
   }
-]
+] as const satisfies readonly SidebarAppDefinition[]
 
-const SIDEBAR_APP_BY_ID: Record<SidebarFavorite, SidebarApp> = SIDEBAR_APPS.reduce(
+export type SidebarAppId = (typeof SIDEBAR_APP_DEFINITIONS)[number]['id']
+export type SidebarApp = SidebarAppDefinition<SidebarAppId>
+
+export const SIDEBAR_APPS: readonly SidebarApp[] = SIDEBAR_APP_DEFINITIONS
+
+const SIDEBAR_APP_BY_ID: Record<SidebarAppId, SidebarApp> = SIDEBAR_APPS.reduce(
   (acc, app) => {
     acc[app.id] = app
     return acc
   },
-  {} as Record<SidebarFavorite, SidebarApp>
+  {} as Record<SidebarAppId, SidebarApp>
 )
 
-export function getSidebarApp(id: SidebarFavorite): SidebarApp | undefined {
+export function getSidebarApp(id: SidebarAppId): SidebarApp | undefined {
   return SIDEBAR_APP_BY_ID[id]
 }
 
@@ -146,100 +127,295 @@ export function tabBelongsToApp(app: SidebarApp, url: string): boolean {
   return url === app.routePrefix || url.startsWith(`${app.routePrefix}/`) || url.startsWith(`${app.routePrefix}?`)
 }
 
-export function getSidebarAppTabInstanceKey(app: SidebarApp, tab: Pick<Tab, 'metadata' | 'url'>): string | undefined {
-  if (!app.instanceKey) return undefined
-  if (isMessageOnlyConversationUrl(tab.url)) return undefined
-  const metadataKey = getTabInstanceKey(tab, app.id)
-  if (metadataKey) return metadataKey
-  if (hasTabInstanceMetadataForApp(tab, app.id)) return undefined
-  return app.instanceKey.keyFromUrl(tab.url)
-}
-
-export function resolveSidebarAppTabEntryUrl(tab: Pick<Tab, 'metadata' | 'url'>): string {
-  if (isMessageOnlyConversationUrl(tab.url)) return tab.url
-
-  const appId = getTabInstanceAppId(tab)
-  const app = appId ? getSidebarApp(appId) : undefined
-  const key = app?.instanceKey ? getSidebarAppTabInstanceKey(app, tab) : undefined
-
-  if (app?.instanceKey && key && tabBelongsToApp(app, tab.url)) {
-    return app.instanceKey.urlForKey(key)
-  }
-
-  return tab.url
-}
-
-export function buildSidebarAppOpenMetadata(app: SidebarApp, key?: string): Tab['metadata'] {
-  if (!app.instanceKey || !key) return undefined
-  if (app.id !== 'assistants' && app.id !== 'agents') return undefined
-  return buildTabInstanceMetadata(undefined, { appId: app.id, key })
-}
-
 /**
  * 侧边栏支持的完整菜单顺序。
  * Preference 默认值可能不包含新菜单，管理态列表仍需要覆盖当前全部支持项。
  */
-export const SIDEBAR_FAVORITE_ORDER: SidebarFavorite[] = SIDEBAR_APPS.map((app) => app.id)
+export const SIDEBAR_FAVORITE_ORDER: SidebarAppId[] = SIDEBAR_APPS.map((app) => app.id)
 
-/**
- * 必须显示的侧边栏收藏项（不能被隐藏）
- * 这些收藏项必须始终在侧边栏中可见
- * 抽取为参数方便未来扩展
- */
-export const REQUIRED_SIDEBAR_FAVORITES: SidebarFavorite[] = ['assistants']
+const sidebarFavoriteSet = new Set<SidebarAppId>(SIDEBAR_FAVORITE_ORDER)
 
-const sidebarFavoriteSet = new Set<SidebarFavorite>(SIDEBAR_FAVORITE_ORDER)
-
-export function getSidebarMenuPath(favorite: SidebarFavorite, defaultPaintingProvider: string): string {
+export function getSidebarMenuPath(favorite: SidebarAppId, defaultPaintingProvider: string): string {
   const app = getSidebarApp(favorite)
   if (!app) return ''
   return app.resolveUrl?.({ defaultPaintingProvider }) ?? app.routePrefix
 }
 
-export function resolveSidebarActiveItem(url: string): SidebarFavorite | '' {
-  const match = SIDEBAR_APPS.find((app) => tabBelongsToApp(app, url))
+export function resolveSidebarActiveItem(url: string): SidebarAppId | '' {
+  const match = SIDEBAR_APPS.find((app) => (app.exactRouteFocus ? url === app.routePrefix : tabBelongsToApp(app, url)))
   return match?.id ?? ''
 }
 
-export function sanitizeSidebarFavorites(favorites: readonly SidebarFavorite[] | undefined): SidebarFavorite[] {
-  const seen = new Set<SidebarFavorite>()
+export function isSidebarAppId(value: string): value is SidebarAppId {
+  return sidebarFavoriteSet.has(value as SidebarAppId)
+}
 
-  return (favorites ?? []).filter((favorite) => {
-    if (!sidebarFavoriteSet.has(favorite) || seen.has(favorite)) {
-      return false
+export const SIDEBAR_SHORTCUT_PROVIDER_IDS = {
+  APP: 'core.app',
+  MINI_APP: 'core.mini-app',
+  AGENT: 'core.agent',
+  ASSISTANT: 'core.assistant',
+  KNOWLEDGE_BASE: 'core.knowledge-base',
+  TOPIC: 'core.topic',
+  AGENT_SESSION: 'core.agent-session',
+  FILE_ENTRY: 'core.file-entry',
+  CODE_CLI: 'core.code-cli'
+} as const
+
+const RETIRED_SIDEBAR_SHORTCUT_PROVIDER_IDS = new Set(['core.skill', 'core.mcp-server', 'core.provider'])
+
+export function createSidebarShortcutTarget(
+  providerId: string,
+  resourceId: string,
+  activationId?: string
+): SidebarShortcutTarget {
+  return {
+    kind: 'resource',
+    locator: { providerId, resourceId },
+    ...(activationId === undefined ? {} : { activationId })
+  }
+}
+
+const LEGACY_PROVIDER_BY_TYPE = {
+  app: SIDEBAR_SHORTCUT_PROVIDER_IDS.APP,
+  mini_app: SIDEBAR_SHORTCUT_PROVIDER_IDS.MINI_APP,
+  agent: SIDEBAR_SHORTCUT_PROVIDER_IDS.AGENT,
+  assistant: SIDEBAR_SHORTCUT_PROVIDER_IDS.ASSISTANT
+} as const
+
+type StoredSidebarItem = Record<string, unknown>
+
+function isRecord(value: unknown): value is StoredSidebarItem {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export function isSidebarShortcutTarget(value: unknown): value is SidebarShortcutTarget {
+  if (!isRecord(value) || value.kind !== 'resource' || !isRecord(value.locator)) return false
+  const { providerId, resourceId } = value.locator
+  return (
+    typeof providerId === 'string' &&
+    providerId.length > 0 &&
+    typeof resourceId === 'string' &&
+    resourceId.length > 0 &&
+    (value.activationId === undefined || (typeof value.activationId === 'string' && value.activationId.length > 0))
+  )
+}
+
+export function isSidebarShortcutItem(value: unknown): value is SidebarShortcutItem {
+  return isRecord(value) && value.type === 'shortcut' && isSidebarShortcutTarget(value.target)
+}
+
+function normalizeKnownSidebarShortcut(value: StoredSidebarItem): SidebarShortcutItem | undefined {
+  if (value.type === 'shortcut') {
+    if (!isSidebarShortcutTarget(value.target)) return undefined
+    if (RETIRED_SIDEBAR_SHORTCUT_PROVIDER_IDS.has(value.target.locator.providerId)) return undefined
+    return {
+      type: 'shortcut',
+      id: createSidebarShortcutId(value.target),
+      target: value.target,
+      ...(typeof value.fallbackLabel === 'string' && value.fallbackLabel.length > 0
+        ? { fallbackLabel: value.fallbackLabel }
+        : {})
     }
+  }
 
-    seen.add(favorite)
-    return true
+  if (typeof value.type !== 'string' || !Object.hasOwn(LEGACY_PROVIDER_BY_TYPE, value.type)) return undefined
+  if (typeof value.id !== 'string' || value.id.length === 0) return undefined
+  if (value.type === 'app' && !isSidebarAppId(value.id)) return undefined
+
+  const providerId = LEGACY_PROVIDER_BY_TYPE[value.type as keyof typeof LEGACY_PROVIDER_BY_TYPE]
+  const target = createSidebarShortcutTarget(providerId, value.id)
+  return {
+    type: 'shortcut',
+    id: createSidebarShortcutId(target),
+    target,
+    ...(typeof value.fallbackLabel === 'string' && value.fallbackLabel.length > 0
+      ? { fallbackLabel: value.fallbackLabel }
+      : {})
+  }
+}
+
+function isForwardCompatibleSidebarItem(value: StoredSidebarItem): boolean {
+  return (
+    typeof value.type === 'string' &&
+    value.type !== 'shortcut' &&
+    !Object.hasOwn(LEGACY_PROVIDER_BY_TYPE, value.type) &&
+    typeof value.id === 'string' &&
+    value.id.length > 0
+  )
+}
+
+/** Normalize storage, migrate legacy leaves, and preserve future items. */
+export function normalizeSidebarShortcutItems(values: readonly unknown[] | undefined): SidebarShortcutItem[] {
+  const items: SidebarShortcutItem[] = []
+  const seen = new Set<string>()
+
+  for (const value of values ?? []) {
+    if (!isRecord(value)) continue
+    const shortcut = normalizeKnownSidebarShortcut(value)
+    if (shortcut) {
+      if (seen.has(shortcut.id)) continue
+      seen.add(shortcut.id)
+      items.push(shortcut)
+      continue
+    }
+    if (!isForwardCompatibleSidebarItem(value)) continue
+
+    const futureKey = `${String(value.type)}:${String(value.id)}`
+    if (seen.has(futureKey)) continue
+    seen.add(futureKey)
+    items.push(value as unknown as SidebarShortcutItem)
+  }
+
+  return items
+}
+
+export function getVisibleSidebarShortcutItems(values: readonly unknown[] | undefined): SidebarShortcutItem[] {
+  return normalizeSidebarShortcutItems(values).filter(isSidebarShortcutItem)
+}
+
+function isBuiltInAppShortcutTarget(target: SidebarShortcutTarget): target is SidebarShortcutTarget & {
+  locator: { providerId: 'core.app'; resourceId: SidebarAppId }
+} {
+  return (
+    target.locator.providerId === SIDEBAR_SHORTCUT_PROVIDER_IDS.APP &&
+    (target.activationId === undefined || target.activationId === 'reveal') &&
+    isSidebarAppId(target.locator.resourceId)
+  )
+}
+
+export function getVisibleSidebarAppIds(values: readonly unknown[] | undefined): SidebarAppId[] {
+  return getVisibleSidebarShortcutItems(values).flatMap((item) => {
+    const { target } = item
+    return isBuiltInAppShortcutTarget(target) ? [target.locator.resourceId] : []
   })
 }
 
-export function getRequiredSidebarFavoritesVisible(
-  favorites: readonly SidebarFavorite[] | undefined
-): SidebarFavorite[] {
-  const visible = new Set(sanitizeSidebarFavorites(favorites))
-
-  for (const favorite of REQUIRED_SIDEBAR_FAVORITES) {
-    visible.add(favorite)
-  }
-
-  return SIDEBAR_FAVORITE_ORDER.filter((favorite) => visible.has(favorite))
+export function getSidebarDefaultLandingUrl(
+  values: readonly unknown[] | undefined,
+  defaultPaintingProvider: string
+): string {
+  const firstApp = getVisibleSidebarAppIds(values)[0]
+  return firstApp ? getSidebarMenuPath(firstApp, defaultPaintingProvider) : ''
 }
 
-export function getOrderedVisibleSidebarFavorites(
-  favorites: readonly SidebarFavorite[] | undefined
-): SidebarFavorite[] {
-  const visible = sanitizeSidebarFavorites(favorites)
+export function addSidebarShortcut(
+  values: readonly unknown[] | undefined,
+  target: SidebarShortcutTarget,
+  fallbackLabel?: string
+): SidebarShortcutItem[] {
+  const items = normalizeSidebarShortcutItems(values)
+  const id = createSidebarShortcutId(target)
+  if (items.some((item) => isSidebarShortcutItem(item) && item.id === id)) return items
+  return [
+    ...items,
+    {
+      type: 'shortcut',
+      id,
+      target,
+      ...(fallbackLabel ? { fallbackLabel } : {})
+    }
+  ]
+}
 
-  for (const favorite of REQUIRED_SIDEBAR_FAVORITES) {
-    if (visible.includes(favorite)) continue
+export function removeSidebarShortcut(
+  values: readonly unknown[] | undefined,
+  target: SidebarShortcutTarget
+): SidebarShortcutItem[] {
+  const id = createSidebarShortcutId(target)
+  const items = normalizeSidebarShortcutItems(values)
+  return items.filter((item) => !isSidebarShortcutItem(item) || item.id !== id)
+}
 
-    const favoriteOrder = SIDEBAR_FAVORITE_ORDER.indexOf(favorite)
-    const insertIndex = visible.findIndex(
-      (visibleFavorite) => SIDEBAR_FAVORITE_ORDER.indexOf(visibleFavorite) > favoriteOrder
-    )
-    visible.splice(insertIndex === -1 ? visible.length : insertIndex, 0, favorite)
+export function reorderSidebarShortcuts(
+  values: readonly unknown[] | undefined,
+  orderedItems: readonly SidebarShortcutItem[]
+): SidebarShortcutItem[] {
+  const items = normalizeSidebarShortcutItems(values)
+  const shortcuts = items.filter(isSidebarShortcutItem)
+  const byId = new Map(shortcuts.map((item) => [item.id, item]))
+  const seen = new Set<string>()
+  const reordered: SidebarShortcutItem[] = []
+
+  for (const requested of orderedItems) {
+    const item = byId.get(requested.id)
+    if (item && !seen.has(item.id)) {
+      seen.add(item.id)
+      reordered.push(item)
+    }
+  }
+  for (const item of shortcuts) {
+    if (!seen.has(item.id)) reordered.push(item)
   }
 
-  return visible
+  let index = 0
+  return items.map((item) => (isSidebarShortcutItem(item) ? reordered[index++] : item))
+}
+
+export function isSidebarShortcutPinned(
+  values: readonly unknown[] | undefined,
+  target: SidebarShortcutTarget
+): boolean {
+  const id = createSidebarShortcutId(target)
+  return getVisibleSidebarShortcutItems(values).some((item) => item.id === id)
+}
+
+// --- Launchpad app order --------------------------------------------------
+//
+// The launchpad orders its built-in app tiles through its own preference
+// (`ui.launchpad.app_order`), completely independent of the sidebar favorites
+// order. Mini app tiles are ordered by their global `orderKey` instead, so the
+// launchpad never reads or writes `ui.sidebar_shortcut`.
+
+/**
+ * The ordered launchpad app ids. Stored order is filtered to valid app ids and
+ * deduped; any app missing from storage (e.g. an empty default or a newly added
+ * app) is appended in canonical order, so a partial or empty store still yields
+ * every app exactly once.
+ */
+export function getOrderedLaunchpadApps(stored: readonly string[] | undefined): SidebarAppId[] {
+  const seen = new Set<SidebarAppId>()
+  const ordered: SidebarAppId[] = []
+
+  for (const id of stored ?? []) {
+    if (isSidebarAppId(id) && !seen.has(id)) {
+      seen.add(id)
+      ordered.push(id)
+    }
+  }
+  for (const id of SIDEBAR_FAVORITE_ORDER) {
+    if (!seen.has(id)) {
+      seen.add(id)
+      ordered.push(id)
+    }
+  }
+
+  return ordered
+}
+
+/**
+ * Reorder the launchpad app list to `orderedIds` (typically the rendered tile
+ * order after a drag). Unknown ids are dropped and any app missing from the
+ * requested order is kept at the end so a partial order never loses apps.
+ */
+export function reorderLaunchpadApps(
+  stored: readonly string[] | undefined,
+  orderedIds: readonly string[]
+): SidebarAppId[] {
+  const current = getOrderedLaunchpadApps(stored)
+  const currentSet = new Set(current)
+  const seen = new Set<SidebarAppId>()
+  const next: SidebarAppId[] = []
+
+  for (const id of orderedIds) {
+    if (isSidebarAppId(id) && currentSet.has(id) && !seen.has(id)) {
+      seen.add(id)
+      next.push(id)
+    }
+  }
+  for (const id of current) {
+    if (!seen.has(id)) next.push(id)
+  }
+
+  return next
 }

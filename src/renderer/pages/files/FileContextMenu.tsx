@@ -1,3 +1,6 @@
+import { FolderClosed, Pencil, Trash2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+
 import {
   ContextMenu,
   ContextMenuContent,
@@ -6,87 +9,87 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger
 } from '@cherrystudio/ui'
-import { FolderClosed, Pencil, RotateCcw, Trash2 } from 'lucide-react'
-import { useTranslation } from 'react-i18next'
+import SidebarShortcutIcon from '@renderer/components/icons/SidebarShortcutIcon'
 
 import type { FileItem } from './fileDisplay'
 
 export interface FileContextMenuActions {
+  isSidebarPinned: (id: string) => boolean
   onRename: (id: string) => void
   onDelete: (id: string) => void
-  onRestore: (id: string) => void
   onShowInFolder: (id: string) => void
+  onToggleSidebar: (file: FileItem) => void
 }
 
 /**
- * Per-file right-click menu. Wraps a file row/card trigger and renders the menu
- * content branched on trash vs. active and internal vs. external origin.
+ * Per-file right-click menu. Wraps a file row/card trigger and renders rename,
+ * show-in-folder, and delete branched on internal vs. external origin.
  *
  * Built on the @cherrystudio/ui ContextMenu primitive (Radix), which provides
  * cursor positioning, click-outside/Escape dismiss, viewport collision, keyboard
  * navigation, and focus management.
- *
- * `onOpen` lets the owner select the right-clicked item when needed; callers can
- * leave existing multi-selection untouched when the item is already selected.
  */
 export function FileContextMenu({
   file,
-  isTrash,
-  onOpen,
   actions,
-  children
+  children,
+  showRename = true,
+  deleteDisabled = false
 }: {
   file: FileItem
-  isTrash: boolean
-  onOpen: (id: string) => void
   actions: FileContextMenuActions
   children: React.ReactNode
+  showRename?: boolean
+  deleteDisabled?: boolean
 }) {
   return (
-    <ContextMenu onOpenChange={(open) => open && onOpen(file.id)}>
+    <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <FileContextMenuContent file={file} isTrash={isTrash} actions={actions} />
+      <FileContextMenuContent file={file} actions={actions} showRename={showRename} deleteDisabled={deleteDisabled} />
     </ContextMenu>
   )
 }
 
 function FileContextMenuContent({
   file,
-  isTrash,
-  actions
+  actions,
+  showRename,
+  deleteDisabled
 }: {
   file: FileItem
-  isTrash: boolean
   actions: FileContextMenuActions
+  showRename: boolean
+  deleteDisabled: boolean
 }) {
   const { t } = useTranslation()
-
-  if (isTrash) {
-    return (
-      <ContextMenuContent className="min-w-32">
-        <ContextMenuItem onSelect={() => actions.onRestore(file.id)}>
-          <ContextMenuItemContent icon={<RotateCcw size={12} />}>{t('files.restore')}</ContextMenuItemContent>
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onSelect={() => actions.onDelete(file.id)}>
-          <ContextMenuItemContent icon={<Trash2 size={12} />}>{t('files.permanent_delete')}</ContextMenuItemContent>
-        </ContextMenuItem>
-      </ContextMenuContent>
-    )
-  }
+  const canUseFileActions = !file.isMissing
+  const canRename = canUseFileActions && showRename
+  const canShowInFolder = canUseFileActions
+  const hasPrimaryAction = canRename || canShowInFolder
+  const sidebarPinned = actions.isSidebarPinned(file.id)
+  const hasSidebarAction = !file.isMissing || sidebarPinned
 
   return (
     <ContextMenuContent className="min-w-32">
-      <ContextMenuItem onSelect={() => actions.onRename(file.id)}>
-        <ContextMenuItemContent icon={<Pencil size={12} />}>{t('files.rename')}</ContextMenuItemContent>
-      </ContextMenuItem>
-      {file.origin === 'external' && (
+      {canRename && (
+        <ContextMenuItem onSelect={() => actions.onRename(file.id)}>
+          <ContextMenuItemContent icon={<Pencil size={12} />}>{t('files.rename')}</ContextMenuItemContent>
+        </ContextMenuItem>
+      )}
+      {canShowInFolder && (
         <ContextMenuItem onSelect={() => actions.onShowInFolder(file.id)}>
           <ContextMenuItemContent icon={<FolderClosed size={12} />}>{t('files.show_in_folder')}</ContextMenuItemContent>
         </ContextMenuItem>
       )}
-      <ContextMenuSeparator />
-      <ContextMenuItem variant="destructive" onSelect={() => actions.onDelete(file.id)}>
+      {hasSidebarAction && (
+        <ContextMenuItem onSelect={() => actions.onToggleSidebar(file)}>
+          <ContextMenuItemContent icon={<SidebarShortcutIcon pinned={sidebarPinned} size={12} />}>
+            {t(sidebarPinned ? 'launchpad.unpin_from_sidebar' : 'launchpad.pin_to_sidebar')}
+          </ContextMenuItemContent>
+        </ContextMenuItem>
+      )}
+      {(hasPrimaryAction || hasSidebarAction) && <ContextMenuSeparator />}
+      <ContextMenuItem disabled={deleteDisabled} variant="destructive" onSelect={() => actions.onDelete(file.id)}>
         <ContextMenuItemContent icon={<Trash2 size={12} />}>
           {file.origin === 'external' ? t('files.remove_from_library') : t('files.delete.label')}
         </ContextMenuItemContent>

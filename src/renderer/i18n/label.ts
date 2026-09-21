@@ -29,9 +29,9 @@ const providerKeyMap = {
   baichuan: 'provider.baichuan',
   'baidu-cloud': 'provider.baidu-cloud',
   burncloud: 'provider.burncloud',
-  cephalon: 'provider.cephalon',
   cherryai: 'provider.cherryai',
   cherryin: 'provider.cherryin',
+  'claude-code': 'provider.claude-code',
   copilot: 'provider.copilot',
   dashscope: 'provider.dashscope',
   deepseek: 'provider.deepseek',
@@ -43,6 +43,7 @@ const providerKeyMap = {
   github: 'provider.github',
   gpustack: 'provider.gpustack',
   grok: 'provider.grok',
+  'grok-cli': 'provider.grok-cli',
   groq: 'provider.groq',
   hunyuan: 'provider.hunyuan',
   hyperbolic: 'provider.hyperbolic',
@@ -60,18 +61,22 @@ const providerKeyMap = {
   ocoolai: 'provider.ocoolai',
   ovms: 'provider.ovms',
   ollama: 'provider.ollama',
+  omlx: 'provider.omlx',
   openai: 'provider.openai',
+  'openai-codex': 'provider.openai-codex',
   openrouter: 'provider.openrouter',
   perplexity: 'provider.perplexity',
   ph8: 'provider.ph8',
   ppio: 'provider.ppio',
   qiniu: 'provider.qiniu',
   qwenlm: 'provider.qwenlm',
+  'radeon-cloud': 'provider.radeon-cloud',
   silicon: 'provider.silicon',
   stepfun: 'provider.stepfun',
   'tencent-cloud-ti': 'provider.tencent-cloud-ti',
   together: 'provider.together',
-  tokenflux: 'provider.tokenflux',
+  tokendance: 'provider.tokendance',
+  tokenhub: 'provider.tokenhub',
   vertexai: 'provider.vertexai',
   voyageai: 'provider.voyageai',
   xirang: 'provider.xirang',
@@ -87,27 +92,37 @@ const providerKeyMap = {
   cerebras: 'provider.cerebras',
   mimo: 'provider.mimo',
   'minimax-global': 'provider.minimax-global',
-  zai: 'provider.zai'
+  'moonshot-global': 'provider.moonshot-global',
+  zai: 'provider.zai',
+  'local-embedding': 'provider.local-embedding',
+  opencode: 'provider.opencode'
 } as const
 
 /**
  * 获取内置供应商的本地化标签
  * @param id - 供应商的id
+ * @param fallback - 未登记该 id 时直接返回的值；省略时记录缺失 key
  * @returns 本地化后的供应商名称
  * @remarks
  * 该函数仅用于获取内置供应商的 i18n label
  *
  * 对于可能处理自定义供应商的情况，使用 getProviderName 或 getFancyProviderName 更安全
  */
-export const getProviderLabelKey = (id: string): string => {
+export const getProviderLabelKey = (id: string, fallback?: string): string => {
+  if (fallback !== undefined && !Object.hasOwn(providerKeyMap, id)) return fallback
   return getLabelKey(providerKeyMap, id)
 }
 
+// Must cover every FILE_PROCESSOR_IDS entry: getLabelKey falls back to the raw
+// id (and logs an error) for anything missing, so a gap here surfaces as
+// "local-document" sitting in a dropdown among properly named siblings.
 const fileProcessorKeyMap = {
   doc2x: 'provider.doc2x',
   mineru: 'provider.mineru',
   ovocr: 'provider.ovocr',
   paddleocr: 'provider.paddleocr',
+  'local-paddleocr': 'settings.tool.file_processing.processors.local_paddleocr.name',
+  'local-document': 'settings.tool.file_processing.processors.local_document.name',
   system: 'provider.system',
   tesseract: 'provider.tesseract',
   mistral: 'provider.mistral',
@@ -152,20 +167,17 @@ export const getRestoreProgressLabelKey = (key: string): string => {
 
 const titleKeyMap = {
   // TODO: update i18n key
-  store: 'title.store',
   apps: 'title.apps',
   code: 'title.code',
   files: 'title.files',
   home: 'title.home',
   knowledge: 'title.knowledge',
   launchpad: 'title.launchpad',
-  library: 'library.title',
   'mcp-servers': 'title.mcp-servers',
   notes: 'title.notes',
   paintings: 'title.paintings',
   settings: 'title.settings',
   translate: 'title.translate',
-  openclaw: 'openclaw.title',
   agents: 'agent.sidebar_title'
 } as const
 
@@ -184,17 +196,15 @@ export const getThemeModeLabelKey = (key: string): string => {
 }
 
 const sidebarIconKeyMap = {
-  assistants: 'agent.session.group.conversation',
+  assistants: 'title.chat',
   agents: 'title.work',
-  store: 'assistants.presets.title',
   paintings: 'title.paintings',
   translate: 'translate.title',
   mini_app: 'miniApp.title',
   knowledge: 'knowledge.title',
   files: 'files.title',
   code_tools: 'code.title',
-  notes: 'notes.title',
-  openclaw: 'openclaw.title'
+  notes: 'notes.title'
 } as const
 
 export const getSidebarIconLabelKey = (key: string): string => {
@@ -214,8 +224,7 @@ const sidebarFavoriteKeyMap = {
   knowledge: 'knowledge.title',
   files: 'files.title',
   code_tools: 'code.title',
-  notes: 'notes.title',
-  openclaw: 'openclaw.title'
+  notes: 'notes.title'
 } as const
 export const getSidebarFavoriteLabelKey = (key: string): string => {
   return getLabelKey(sidebarFavoriteKeyMap, key)
@@ -280,18 +289,6 @@ export const getMcpTypeLabelKey = (key: string): string => {
   return getLabelKey(mcpTypeKeyMap, key)
 }
 
-const mcpProviderDescriptionKeyMap = {
-  '302ai': 'settings.mcp.sync.providerDescriptions.302ai',
-  bailian: 'settings.mcp.sync.providerDescriptions.bailian',
-  lanyun: 'settings.mcp.sync.providerDescriptions.lanyun',
-  mcprouter: 'settings.mcp.sync.providerDescriptions.mcprouter',
-  modelscope: 'settings.mcp.sync.providerDescriptions.modelscope'
-} as const
-
-export const getMcpProviderDescriptionLabelKey = (key: string): string => {
-  return getLabelKey(mcpProviderDescriptionKeyMap, key)
-}
-
 const miniAppsStatusKeyMap = {
   visible: 'settings.miniApps.visible',
   disabled: 'settings.miniApps.disabled'
@@ -304,6 +301,7 @@ export const getMiniAppsStatusLabelKey = (key: string): string => {
 const httpMessageKeyMap = {
   '400': 'error.http.400',
   '401': 'error.http.401',
+  '402': 'error.http.402',
   '403': 'error.http.403',
   '404': 'error.http.404',
   '429': 'error.http.429',
@@ -329,6 +327,7 @@ export const getFileFieldLabelKey = (key: string): string => {
 
 const builtInMcpDescriptionKeyMap: Record<BuiltinMcpServerName, string> = {
   [BuiltinMcpServerNames.flomo]: 'settings.mcp.builtinServersDescriptions.flomo',
+  [BuiltinMcpServerNames.qveris]: 'settings.mcp.builtinServersDescriptions.qveris',
   [BuiltinMcpServerNames.mcpAutoInstall]: 'settings.mcp.builtinServersDescriptions.mcp_auto_install',
   [BuiltinMcpServerNames.memory]: 'settings.mcp.builtinServersDescriptions.memory',
   [BuiltinMcpServerNames.sequentialThinking]: 'settings.mcp.builtinServersDescriptions.sequentialthinking',

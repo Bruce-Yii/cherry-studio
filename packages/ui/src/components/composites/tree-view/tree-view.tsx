@@ -1,5 +1,6 @@
-import { cn } from '@cherrystudio/ui/lib/utils'
 import { useCallback, useMemo } from 'react'
+
+import { cn } from '@cherrystudio/ui/lib/utils'
 
 import {
   TreeActionsContext,
@@ -109,7 +110,7 @@ export function TreeView<T>(props: TreeViewProps<T>) {
       const item = flat[index]
       if (!item) return null
       const children = adapter.getChildren(item.node)
-      const hasChildren = !!(children && children.length > 0)
+      const hasChildren = !!(children && children.length > 0) || adapter.canHaveChildren?.(item.node) === true
       return (
         <TreeRow
           key={item.id}

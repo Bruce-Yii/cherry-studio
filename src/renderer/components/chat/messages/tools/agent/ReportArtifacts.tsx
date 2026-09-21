@@ -1,14 +1,20 @@
-import { Tooltip } from '@cherrystudio/ui'
 import { Icon } from '@iconify/react'
-import type { McpToolResponse, NormalToolResponse } from '@renderer/types/mcpTool'
-import { getFileIconName } from '@renderer/utils/fileIconName'
-import { REPORT_ARTIFACTS_TOOL_NAME, reportArtifactsInputSchema } from '@shared/ai/builtinTools'
-import { ExternalLink } from 'lucide-react'
-import { type MouseEvent, useCallback, useMemo } from 'react'
+import { ChevronDown } from 'lucide-react'
+import { type MouseEvent, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { Button } from '@cherrystudio/ui'
+import { CommandContextMenu, type CommandContextMenuExtraItem, CommandPopupMenu } from '@renderer/components/command'
+import { getOpenTargetBadge, getOpenTargetLabel, OpenTargetIcon } from '@renderer/components/OpenTarget'
+import { useExternalOpenTargets } from '@renderer/hooks/useExternalOpenTargets'
+import type { McpToolResponse, NormalToolResponse } from '@renderer/types/mcpTool'
+import { getFileIconName } from '@renderer/utils/fileIconName'
+import { normalizeInlineFilePath, resolveInlineFilePath } from '@renderer/utils/filePath'
+import { REPORT_ARTIFACTS_TOOL_NAME, reportArtifactsInputSchema } from '@shared/ai/builtinTools'
+import type { ExternalOpenTarget } from '@shared/types/externalApp'
+import { AbsoluteFilePathSchema } from '@shared/types/file'
+
 import { useOptionalMessageListActions } from '../../MessageListProvider'
-import { normalizeInlineFilePath, resolveInlineFilePath } from '../../utils/filePath'
 
 export type ReportArtifactsToolResponse = McpToolResponse | NormalToolResponse
 
@@ -64,12 +70,24 @@ function ReportArtifactFileCard({ artifact }: { artifact: ReportArtifactView }) 
   const { t } = useTranslation()
   const actions = useOptionalMessageListActions()
   const openArtifactFile = actions?.openArtifactFile
-  const openPath = actions?.openPath
+  const copyText = actions?.copyText
   const notifyError = actions?.notifyError
+  const resolvePath = actions?.resolvePath
   const displayPath = useMemo(() => normalizeInlineFilePath(artifact.path), [artifact.path])
-  const targetPath = useMemo(() => resolveInlineFilePath(artifact.path), [artifact.path])
+  const unresolvedTargetPath = useMemo(() => resolveInlineFilePath(artifact.path), [artifact.path])
+  const targetPath = useMemo(
+    () => resolvePath?.(unresolvedTargetPath) ?? unresolvedTargetPath,
+    [resolvePath, unresolvedTargetPath]
+  )
   const fileName = useMemo(() => getArtifactFileName(displayPath), [displayPath])
   const iconName = useMemo(() => getFileIconName(displayPath), [displayPath])
+  const [popupMenuOpen, setPopupMenuOpen] = useState(false)
+  const [contextMenuOpen, setContextMenuOpen] = useState(false)
+  const hasAbsoluteTargetPath = AbsoluteFilePathSchema.safeParse(targetPath).success
+  const { data, error, targets, openTarget } = useExternalOpenTargets(targetPath, 'file', {
+    enabled: hasAbsoluteTargetPath && (popupMenuOpen || contextMenuOpen)
+  })
+  const hasOpenActions = Boolean(openArtifactFile || hasAbsoluteTargetPath)
 
   const handlePreview = useCallback(() => {
     if (!openArtifactFile) return
@@ -78,43 +96,121 @@ function ReportArtifactFileCard({ artifact }: { artifact: ReportArtifactView }) 
     })
   }, [notifyError, openArtifactFile, t, targetPath])
 
-  const handleOpenExternal = useCallback(
-    (event: MouseEvent<HTMLButtonElement>) => {
-      event.stopPropagation()
-      if (!openPath) return
-      Promise.resolve(openPath(targetPath)).catch(() => {
+  const handleCopyPath = useCallback(() => {
+    if (!copyText) return
+    Promise.resolve(copyText(displayPath, { successMessage: t('common.copied') })).catch(() => {
+      notifyError?.(t('message.copy.failed'))
+    })
+  }, [copyText, displayPath, notifyError, t])
+
+  const handleOpenTarget = useCallback(
+    (target: ExternalOpenTarget) => {
+      void openTarget(target).catch(() => {
         notifyError?.(t('chat.input.tools.open_file_error', { path: targetPath }))
       })
     },
-    [notifyError, openPath, t, targetPath]
+    [notifyError, openTarget, t, targetPath]
   )
 
-  return (
+  const contextMenuItems = useMemo<readonly CommandContextMenuExtraItem[]>(() => {
+    const items: CommandContextMenuExtraItem[] = []
+    if (openArtifactFile) {
+      items.push({
+        type: 'item',
+        id: 'artifact.preview',
+        label: t('common.preview'),
+        onSelect: handlePreview
+      })
+    }
+    if (hasAbsoluteTargetPath && targets.length === 0 && !data && !error) {
+      items.push({
+        type: 'item',
+        id: 'artifact.open-target.loading',
+        label: t('common.loading'),
+        enabled: false,
+        onSelect: () => undefined
+      })
+    }
+    for (const target of targets) {
+      items.push({
+        type: 'item',
+        id: `artifact.open-target.${target.id}`,
+        label: getOpenTargetLabel(target, t),
+        icon: <OpenTargetIcon target={target} />,
+        badge: getOpenTargetBadge(target, t),
+        onSelect: () => handleOpenTarget(target)
+      })
+    }
+    if (copyText) {
+      if (items.length > 0) items.push({ type: 'separator' })
+      items.push({
+        type: 'item',
+        id: 'artifact.copy-path',
+        label: t('common.copy'),
+        onSelect: handleCopyPath
+      })
+    }
+    return items
+  }, [
+    copyText,
+    data,
+    error,
+    handleCopyPath,
+    handleOpenTarget,
+    handlePreview,
+    hasAbsoluteTargetPath,
+    openArtifactFile,
+    t,
+    targets
+  ])
+
+  const card = (
     <div className="group/artifact flex w-full max-w-xl items-center overflow-hidden rounded-lg border-[0.5px] border-border bg-background-subtle transition-colors hover:bg-accent">
       <button
         type="button"
-        disabled={!openArtifactFile}
-        onClick={handlePreview}
+        aria-disabled={!openArtifactFile}
+        onClick={openArtifactFile ? handlePreview : undefined}
         title={displayPath}
         aria-label={`${t('common.preview')} ${fileName}`}
-        className="flex min-h-12 min-w-0 flex-1 items-center gap-2.5 border-0 bg-transparent px-2.5 py-2 text-left disabled:cursor-default">
+        className="flex min-h-12 min-w-0 flex-1 items-center gap-2.5 border-0 bg-transparent px-2.5 py-2 text-left aria-disabled:cursor-default">
         <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-background">
           <Icon icon={`material-icon-theme:${iconName}`} className="text-[20px]" />
         </span>
         <span className="min-w-0 truncate font-medium text-[13px] text-foreground leading-5">{fileName}</span>
       </button>
-      {openPath && (
-        <Tooltip content={t('chat.input.tools.open_file')} delay={500}>
-          <button
+      {hasOpenActions && (
+        <CommandPopupMenu
+          location="webcontents.context"
+          extraItems={contextMenuItems}
+          onOpenChange={setPopupMenuOpen}
+          align="end"
+          side="bottom"
+          sideOffset={6}
+          contentClassName="min-w-44">
+          <Button
             type="button"
-            aria-label={`${t('chat.input.tools.open_file')} ${fileName}`}
-            onClick={handleOpenExternal}
-            className="mr-2 flex size-7 shrink-0 items-center justify-center rounded-md text-foreground-muted opacity-70 transition-colors hover:bg-background hover:text-foreground hover:opacity-100">
-            <ExternalLink size={15} />
-          </button>
-        </Tooltip>
+            variant="outline"
+            aria-label={`${t('chat.input.tools.open_with')} ${fileName}`}
+            onClick={(event: MouseEvent<HTMLButtonElement>) => {
+              event.stopPropagation()
+            }}
+            className="mr-2 rounded-lg data-[state=open]:bg-accent">
+            {t('chat.input.tools.open_with')}
+            <ChevronDown className="text-muted-foreground" size={14} />
+          </Button>
+        </CommandPopupMenu>
       )}
     </div>
+  )
+
+  if (contextMenuItems.length === 0) {
+    return card
+  }
+
+  return (
+    <CommandContextMenu location="webcontents.context" extraItems={contextMenuItems} onOpenChange={setContextMenuOpen}>
+      {card}
+    </CommandContextMenu>
   )
 }
 

@@ -1,6 +1,12 @@
+import { useNavigate } from '@tanstack/react-router'
+import { Check, ChevronDown, Info } from 'lucide-react'
+import type React from 'react'
+import type { FC } from 'react'
+import { useEffect, useId, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+
 import {
   Button,
-  ButtonGroup,
   Command,
   CommandEmpty,
   CommandGroup,
@@ -12,24 +18,29 @@ import {
   PopoverContent,
   PopoverTrigger,
   RowFlex,
+  SegmentedControl,
   Switch
 } from '@cherrystudio/ui'
 import { usePreference } from '@data/hooks/usePreference'
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
+import { ModelSettingsNavigation } from '@renderer/components/ModelSettingsNavigation'
+import {
+  SettingDivider,
+  SettingGroup,
+  SettingRow,
+  SettingRowTitle,
+  SettingsContentColumn,
+  SettingTitle
+} from '@renderer/components/SettingsPrimitives'
 import { useAssistants } from '@renderer/hooks/useAssistant'
 import { useDefaultModel } from '@renderer/hooks/useModel'
 import { useTheme } from '@renderer/hooks/useTheme'
+import { ipcApi } from '@renderer/ipc'
+import { toast } from '@renderer/services/toast'
 import type { Assistant } from '@renderer/types/assistant'
 import { cn } from '@renderer/utils/style'
 import HomeWindow from '@renderer/windows/quickAssistant/home/HomeWindow'
 import type { Model } from '@shared/data/types/model'
-import { Check, ChevronDown, Info } from 'lucide-react'
-import type React from 'react'
-import type { FC } from 'react'
-import { useState } from 'react'
-import { useTranslation } from 'react-i18next'
-
-import { SettingDivider, SettingGroup, SettingRow, SettingRowTitle, SettingsContentColumn, SettingTitle } from '.'
 
 const QuickAssistantSettings: FC = () => {
   const [enableQuickAssistant, setEnableQuickAssistant] = usePreference('feature.quick_assistant.enabled')
@@ -44,24 +55,36 @@ const QuickAssistantSettings: FC = () => {
 
   const { t } = useTranslation()
   const { theme } = useTheme()
-  const { assistants } = useAssistants()
+  const { assistants, hasLoaded: haveAssistantsLoaded } = useAssistants()
   const { defaultModel } = useDefaultModel()
+  const navigate = useNavigate()
   const [assistantSelectOpen, setAssistantSelectOpen] = useState(false)
+  const usageMethodTitleId = useId()
+  const configurationTitleId = useId()
 
   const assistantOptions = assistants
   const firstAssistantId = assistantOptions[0]?.id
   const selectedAssistant = assistantOptions.find((assistant) => assistant.id === quickAssistantId)
+  const isAssistantMode = Boolean(quickAssistantId && (!haveAssistantsLoaded || selectedAssistant))
+
+  useEffect(() => {
+    if (haveAssistantsLoaded && quickAssistantId && !selectedAssistant) {
+      void setQuickAssistantId('')
+    }
+  }, [haveAssistantsLoaded, quickAssistantId, selectedAssistant, setQuickAssistantId])
+
   const handleAssistantSelect = (assistantId: string) => {
     void setQuickAssistantId(assistantId)
+    setAssistantSelectOpen(false)
   }
 
   const handleEnableQuickAssistant = async (enable: boolean) => {
     await setEnableQuickAssistant(enable)
 
-    void (!enable && window.api.quickAssistant.close())
+    void (!enable && ipcApi.request('quick_assistant.close'))
 
     if (enable && !clickTrayToShowQuickAssistant) {
-      window.toast.info({
+      toast.info({
         title: t('settings.quickAssistant.use_shortcut_to_show'),
         timeout: 4000,
         icon: <Info size={16} />
@@ -80,7 +103,7 @@ const QuickAssistantSettings: FC = () => {
 
   const handleClickReadClipboardAtStartup = async (checked: boolean) => {
     await setReadClipboardAtStartup(checked)
-    void window.api.quickAssistant.close()
+    void ipcApi.request('quick_assistant.close')
   }
 
   return (
@@ -88,7 +111,7 @@ const QuickAssistantSettings: FC = () => {
       <SettingGroup theme={theme}>
         <SettingTitle>{t('settings.quickAssistant.title')}</SettingTitle>
         <SettingDivider />
-        <SettingRow>
+        <SettingRow id="setting-quick-assistant-enable-quick-assistant" className="scroll-mt-6">
           <SettingRowTitle style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <span>{t('settings.quickAssistant.enable_quick_assistant')}</span>
             <InfoTooltip
@@ -120,17 +143,45 @@ const QuickAssistantSettings: FC = () => {
       </SettingGroup>
       {enableQuickAssistant && (
         <SettingGroup theme={theme}>
-          <SettingRow className="min-h-8.5 flex-nowrap gap-3">
-            <SettingRowTitle className="gap-2.5">
-              {t('settings.models.quick_assistant_model')}
-              <InfoTooltip
-                content={t('selection.settings.user_modal.model.tooltip')}
-                showArrow
-                iconProps={{ className: 'cursor-pointer' }}
-              />
+          <SettingTitle>{t('settings.models.quick_assistant_response_settings')}</SettingTitle>
+          <SettingDivider />
+          <SettingRow role="group" aria-labelledby={usageMethodTitleId} className="min-h-8.5 gap-3">
+            <SettingRowTitle id={usageMethodTitleId}>
+              {t('settings.models.quick_assistant_usage_method')}
             </SettingRowTitle>
-            <RowFlex className="items-center gap-2.5">
-              {!quickAssistantId || !selectedAssistant ? null : (
+            <SegmentedControl<'assistant' | 'model'>
+              aria-label={t('settings.models.quick_assistant_usage_method')}
+              size="sm"
+              value={isAssistantMode ? 'assistant' : 'model'}
+              options={[
+                {
+                  value: 'assistant',
+                  label: t('settings.models.use_assistant'),
+                  disabled: assistantOptions.length === 0
+                },
+                { value: 'model', label: t('settings.models.use_model') }
+              ]}
+              onValueChange={(value) => void setQuickAssistantId(value === 'assistant' ? (firstAssistantId ?? '') : '')}
+            />
+          </SettingRow>
+          <SettingDivider />
+          <SettingRow role="group" aria-labelledby={configurationTitleId} className="min-h-8.5 flex-nowrap gap-3">
+            <SettingRowTitle id={configurationTitleId} className={isAssistantMode ? 'gap-2.5' : undefined}>
+              {t(
+                isAssistantMode
+                  ? 'settings.models.quick_assistant_selection'
+                  : 'settings.models.default_assistant_model'
+              )}
+              {isAssistantMode && (
+                <InfoTooltip
+                  content={t('selection.settings.user_modal.model.tooltip')}
+                  showArrow
+                  iconProps={{ className: 'cursor-pointer' }}
+                />
+              )}
+            </SettingRowTitle>
+            {isAssistantMode ? (
+              selectedAssistant ? (
                 <RowFlex className="items-center">
                   <Popover open={assistantSelectOpen} onOpenChange={setAssistantSelectOpen}>
                     <PopoverTrigger asChild>
@@ -182,25 +233,13 @@ const QuickAssistantSettings: FC = () => {
                     </PopoverContent>
                   </Popover>
                 </RowFlex>
-              )}
-              <ButtonGroup>
-                <Button
-                  className="min-w-20"
-                  variant={quickAssistantId && selectedAssistant ? 'default' : 'outline'}
-                  disabled={assistantOptions.length === 0}
-                  onClick={() => {
-                    void setQuickAssistantId(firstAssistantId ?? '')
-                  }}>
-                  {t('settings.models.use_assistant')}
-                </Button>
-                <Button
-                  className="min-w-20"
-                  variant={!quickAssistantId ? 'default' : 'outline'}
-                  onClick={() => void setQuickAssistantId('')}>
-                  {t('settings.models.use_model')}
-                </Button>
-              </ButtonGroup>
-            </RowFlex>
+              ) : null
+            ) : (
+              <ModelSettingsNavigation
+                model={defaultModel}
+                onNavigate={() => void navigate({ to: '/settings/model', search: { focus: 'default' } })}
+              />
+            )}
           </SettingRow>
         </SettingGroup>
       )}
@@ -253,7 +292,7 @@ const DefaultTag = ({
   ...props
 }: React.ComponentPropsWithoutRef<'span'> & { isCurrent: boolean }) => (
   <span
-    className={cn('rounded px-1 py-0.5 text-xs', isCurrent ? 'text-primary' : 'text-foreground-muted', className)}
+    className={cn('rounded px-1 py-0.5 text-xs', isCurrent ? 'text-primary' : 'text-foreground-tertiary', className)}
     {...props}
   />
 )

@@ -1,12 +1,14 @@
-import type { TopicStreamStatus } from '@shared/ai/transport'
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { TopicStreamStatus } from '@shared/ai/transport'
 
 const mockEntry = vi.fn<() => { status: TopicStreamStatus | undefined } | undefined>()
 
 // Mock at the cache layer (intra-module calls can't be intercepted at the hook).
+// The main-owned status entry is observed read-only via useSharedCacheValue.
 vi.mock('@renderer/data/hooks/useCache', () => ({
-  useSharedCache: () => [mockEntry()]
+  useSharedCacheValue: () => mockEntry()
 }))
 
 import { useTopicOverlayHandoffOnTerminal } from '../useTopicStreamStatus'
@@ -14,7 +16,9 @@ import { useTopicOverlayHandoffOnTerminal } from '../useTopicStreamStatus'
 const setStatus = (status: TopicStreamStatus | undefined) => mockEntry.mockReturnValue({ status })
 
 describe('useTopicOverlayHandoffOnTerminal', () => {
-  beforeEach(() => mockEntry.mockReset())
+  beforeEach(() => {
+    mockEntry.mockReset()
+  })
 
   it.each<TopicStreamStatus>(['done', 'error', 'aborted'])('fires once on streaming → %s', async (terminal) => {
     const handoff = vi.fn(async () => {})
@@ -94,5 +98,21 @@ describe('useTopicOverlayHandoffOnTerminal', () => {
       await Promise.resolve()
     })
     expect(order).toEqual(['refresh', 'dispose'])
+  })
+
+  it('does not carry a live edge across topic identities', async () => {
+    const handoff = vi.fn(async () => {})
+    setStatus('streaming')
+    const { rerender } = renderHook(
+      ({ topicId }: { topicId: string }) => useTopicOverlayHandoffOnTerminal(topicId, handoff),
+      { initialProps: { topicId: 'topic-1' } }
+    )
+
+    setStatus('done')
+    await act(async () => {
+      rerender({ topicId: 'topic-2' })
+    })
+
+    expect(handoff).not.toHaveBeenCalled()
   })
 })

@@ -1,11 +1,13 @@
-import { Scrollbar } from '@cherrystudio/ui'
-import { MessageContentProvider, type MessageListItem } from '@renderer/components/chat/messages'
-import { useMessageListRenderConfig } from '@renderer/components/chat/messages/hooks/useMessageListRenderConfig'
-import { useMessagePlatformActions } from '@renderer/components/chat/messages/hooks/useMessagePlatformActions'
-import type { Assistant } from '@renderer/types/assistant'
-import type { CherryMessagePart } from '@shared/data/types/message'
 import { Loader2 } from 'lucide-react'
 import type { FC } from 'react'
+
+import { Scrollbar } from '@cherrystudio/ui'
+import { useMessageListRenderConfig } from '@renderer/components/chat/messages/hooks/useMessageListRenderConfig'
+import { useMessagePlatformActions } from '@renderer/components/chat/messages/hooks/useMessagePlatformActions'
+import { MessageContentProvider } from '@renderer/components/chat/messages/MessageContentProvider'
+import type { MessageListItem } from '@renderer/components/chat/messages/types'
+import type { Assistant } from '@renderer/types/assistant'
+import type { CherryMessagePart } from '@shared/data/types/message'
 
 import MessageItem from './Message'
 

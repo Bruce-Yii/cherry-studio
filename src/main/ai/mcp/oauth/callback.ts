@@ -1,46 +1,18 @@
-import { loggerService } from '@logger'
-import { getAppLanguage, locales } from '@main/utils/language'
 import type EventEmitter from 'events'
 import http from 'http'
 import { URL } from 'url'
+
+import { loggerService } from '@logger'
+import { t } from '@main/i18n'
 
 import type { OAuthCallbackServerOptions } from './types'
 
 const logger = loggerService.withContext('Mcp:OAuthCallbackServer')
 
-function getTranslation(key: string): string {
-  const language = getAppLanguage()
-  const localeData = locales[language]
-
-  if (!localeData) {
-    logger.warn(`No locale data found for language: ${language}`)
-    return key
-  }
-
-  const translations = localeData.translation
-  if (!translations) {
-    logger.warn(`No translations found for language: ${language}`)
-    return key
-  }
-
-  const keys = key.split('.')
-  let value = translations
-
-  for (const k of keys) {
-    if (value && typeof value === 'object' && k in value) {
-      value = value[k]
-    } else {
-      logger.warn(`Translation key not found: ${key} (failed at: ${k})`)
-      return key // fallback to key if translation not found
-    }
-  }
-
-  return typeof value === 'string' ? value : key
-}
-
 export class CallBackServer {
   private server: Promise<http.Server>
   private events: EventEmitter
+  private authCode?: string
 
   constructor(options: OAuthCallbackServerOptions) {
     const { port, path, events } = options
@@ -57,11 +29,11 @@ export class CallBackServer {
           const url = new URL(req.url, `http://127.0.0.1:${port}`)
           const code = url.searchParams.get('code')
           if (code) {
-            // Emit the code event
+            this.authCode = code
             this.events.emit('auth-code-received', code)
             // Send success response to browser
-            const title = getTranslation('settings.mcp.oauth.callback.title')
-            const message = getTranslation('settings.mcp.oauth.callback.message')
+            const title = t('settings.mcp.oauth.callback.title')
+            const message = t('settings.mcp.oauth.callback.message')
 
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
             res.end(`
@@ -143,8 +115,8 @@ export class CallBackServer {
   }
 
   async close() {
-    const server = await this.server
-    server.close()
+    // Listen may have failed (getServer rejected) or close may run twice (timeout + finally).
+    await this.server.then((server) => server.close()).catch(() => undefined)
   }
 
   /**
@@ -153,6 +125,7 @@ export class CallBackServer {
    * cancelled / never-completed callback, leaking the connect attempt and its status.
    */
   async waitForAuthCode(timeoutMs = 300_000): Promise<string> {
+    if (this.authCode !== undefined) return this.authCode
     return new Promise((resolve, reject) => {
       const onCode = (code: string) => {
         clearTimeout(timer)

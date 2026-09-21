@@ -1,16 +1,35 @@
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Slider } from '@cherrystudio/ui'
-import { useMultiplePreferences, usePreference } from '@data/hooks/usePreference'
-import EditableNumber from '@renderer/components/EditableNumber'
-import { SettingGroup as PageSettingGroup, SettingTitle } from '@renderer/components/SettingsPrimitives'
-import { useCodeStyle } from '@renderer/hooks/useCodeStyle'
-import { useTheme } from '@renderer/hooks/useTheme'
-import type { CodeStyleVarious } from '@renderer/types/app'
-import { getSendMessageShortcutLabel } from '@renderer/utils/input'
-import type { SendMessageShortcut } from '@shared/data/preference/preferenceTypes'
-import { ThemeMode } from '@shared/data/preference/preferenceTypes'
 import type { FC, ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+
+import {
+  Flex,
+  InputNumber,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  Slider,
+  Switch
+} from '@cherrystudio/ui'
+import { useMultiplePreferences, usePreference } from '@data/hooks/usePreference'
+import Selector from '@renderer/components/Selector'
+import { SettingGroup as PageSettingGroup, SettingTitle } from '@renderer/components/SettingsPrimitives'
+import { useCodeStyleThemeCatalog } from '@renderer/hooks/useCodeStyle'
+import { useTheme } from '@renderer/hooks/useTheme'
+import type { CodeStyleVarious } from '@renderer/types/app'
+import {
+  COMPOSER_SHORTCUTS,
+  composerShortcutId,
+  getComposerShortcutLabel,
+  resolveNewlineShortcut,
+  resolveSendShortcut,
+  resolveSteerShortcut
+} from '@renderer/utils/input'
+import { isMac } from '@renderer/utils/platform'
+import type { ComposerShortcut } from '@shared/data/preference/preferenceTypes'
+import { ThemeMode } from '@shared/data/preference/preferenceTypes'
 
 import {
   SettingDivider,
@@ -24,11 +43,38 @@ type SelectOption<T extends string = string> = {
   value: T
   label: string
 }
+type SpellCheckOption = { readonly value: string; readonly label: string; readonly flag: string }
 
-const ChatPreferenceSections: FC = () => {
+type ChatPreferenceSectionsProps = {
+  sectionClassName?: string
+}
+
+const spellCheckLanguageOptions: readonly SpellCheckOption[] = [
+  { value: 'en-US', label: 'English (US)', flag: '🇺🇸' },
+  { value: 'es', label: 'Español', flag: '🇪🇸' },
+  { value: 'fr', label: 'Français', flag: '🇫🇷' },
+  { value: 'de', label: 'Deutsch', flag: '🇩🇪' },
+  { value: 'it', label: 'Italiano', flag: '🇮🇹' },
+  { value: 'pt', label: 'Português', flag: '🇵🇹' },
+  { value: 'ru', label: 'Русский', flag: '🇷🇺' },
+  { value: 'nl', label: 'Nederlands', flag: '🇳🇱' },
+  { value: 'pl', label: 'Polski', flag: '🇵🇱' },
+  { value: 'sk', label: 'Slovenčina', flag: '🇸🇰' },
+  { value: 'el', label: 'Ελληνικά', flag: '🇬🇷' }
+]
+
+const ChatPreferenceSections: FC<ChatPreferenceSectionsProps> = ({ sectionClassName }) => {
   const [messageStyle, setMessageStyle] = usePreference('chat.message.style')
   const [fontSize, setFontSize] = usePreference('chat.message.font_size')
-  const [sendMessageShortcut, setSendMessageShortcut] = usePreference('chat.input.send_message_shortcut')
+  const [storedSendShortcut, setSendMessageShortcut] = usePreference('chat.input.send_message_shortcut')
+  const [steerShortcut, setSteerShortcut] = usePreference('chat.input.steer_shortcut')
+  const [newlineShortcut, setNewlineShortcut] = usePreference('chat.input.newline_shortcut')
+  // Newline and steer are stored as null until the user overrides them; show the effective default.
+  const resolvedSendShortcut = resolveSendShortcut(storedSendShortcut)
+  const resolvedNewlineShortcut = resolveNewlineShortcut(newlineShortcut, resolvedSendShortcut)
+  const resolvedSteerShortcut = resolveSteerShortcut(steerShortcut, resolvedSendShortcut, resolvedNewlineShortcut)
+  const [enableSpellCheck, setEnableSpellCheck] = usePreference('app.spell_check.enabled')
+  const [spellCheckLanguages, setSpellCheckLanguages] = usePreference('app.spell_check.languages')
   const [messageFont, setMessageFont] = usePreference('chat.message.font')
   const [confirmDeleteMessage, setConfirmDeleteMessage] = usePreference('chat.message.confirm_delete')
   const [messageNavigation, setMessageNavigation] = usePreference('chat.message.navigation_mode')
@@ -37,6 +83,8 @@ const ChatPreferenceSections: FC = () => {
   const [multiModelMessageStyle, setMultiModelMessageStyle] = usePreference('chat.message.multi_model.style')
   const [mathEnableSingleDollar, setMathEnableSingleDollar] = usePreference('chat.message.math.single_dollar')
   const [showInputEstimatedTokens, setShowInputEstimatedTokens] = usePreference('chat.input.show_estimated_tokens')
+  const [pasteLongTextAsFile, setPasteLongTextAsFile] = usePreference('chat.input.paste_long_text_as_file')
+  const [pasteLongTextThreshold, setPasteLongTextThreshold] = usePreference('chat.input.paste_long_text_threshold')
   const [renderInputMessageAsMarkdown, setRenderInputMessageAsMarkdown] = usePreference(
     'chat.message.render_as_markdown'
   )
@@ -44,7 +92,6 @@ const ChatPreferenceSections: FC = () => {
   const [codeShowLineNumbers, setCodeShowLineNumbers] = usePreference('chat.code.show_line_numbers')
   const [codeCollapsible, setCodeCollapsible] = usePreference('chat.code.collapsible')
   const [codeWrappable, setCodeWrappable] = usePreference('chat.code.wrappable')
-  const [codeImageTools, setCodeImageTools] = usePreference('chat.code.image_tools')
   const [codeEditor, setCodeEditor] = useMultiplePreferences({
     enabled: 'chat.code.editor.enabled',
     themeLight: 'chat.code.editor.theme_light',
@@ -58,22 +105,22 @@ const ChatPreferenceSections: FC = () => {
     themeLight: 'chat.code.viewer.theme_light',
     themeDark: 'chat.code.viewer.theme_dark'
   })
-  const [codeExecution, setCodeExecution] = useMultiplePreferences({
-    enabled: 'chat.code.execution.enabled',
-    timeoutMinutes: 'chat.code.execution.timeout_minutes'
-  })
   const [codeFancyBlock, setCodeFancyBlock] = usePreference('chat.code.fancy_block')
   const wideMode = !narrowMode
   const setWideMode = (checked: boolean) => setNarrowMode(!checked)
 
   const { theme } = useTheme()
-  const { themeNames } = useCodeStyle()
+  const { loadThemeNames, themeNames } = useCodeStyleThemeCatalog()
   const [fontSizeValue, setFontSizeValue] = useState(fontSize)
   const { t } = useTranslation()
 
   useEffect(() => {
     setFontSizeValue(fontSize)
   }, [fontSize])
+
+  useEffect(() => {
+    void loadThemeNames()
+  }, [loadThemeNames])
 
   const messageStyleItems = useMemo<SelectOption<'plain' | 'bubble'>[]>(
     () => [
@@ -97,14 +144,20 @@ const ChatPreferenceSections: FC = () => {
     [themeNames]
   )
 
-  const sendMessageShortcutItems = useMemo<SelectOption<SendMessageShortcut>[]>(
-    () => [
-      { value: 'Enter', label: getSendMessageShortcutLabel('Enter') },
-      { value: 'Ctrl+Enter', label: getSendMessageShortcutLabel('Ctrl+Enter') },
-      { value: 'Alt+Enter', label: getSendMessageShortcutLabel('Alt+Enter') },
-      { value: 'Command+Enter', label: getSendMessageShortcutLabel('Command+Enter') },
-      { value: 'Shift+Enter', label: getSendMessageShortcutLabel('Shift+Enter') }
-    ],
+  // Send / newline / steer are mutually exclusive: each select hides the two keys already in use.
+  // Bindings are arrays, so the select trades in their ids and maps back on change.
+  const shortcutItemsExcluding = useCallback((...taken: ComposerShortcut[]): SelectOption<string>[] => {
+    const takenIds = taken.map(composerShortcutId)
+    return COMPOSER_SHORTCUTS.filter((shortcut) => !takenIds.includes(composerShortcutId(shortcut))).map(
+      (shortcut) => ({ value: composerShortcutId(shortcut), label: getComposerShortcutLabel(shortcut) })
+    )
+  }, [])
+
+  const setShortcutById = useCallback(
+    (setter: (value: ComposerShortcut) => unknown) => (id: string) => {
+      const shortcut = COMPOSER_SHORTCUTS.find((candidate) => composerShortcutId(candidate) === id)
+      if (shortcut) void setter(shortcut)
+    },
     []
   )
 
@@ -135,7 +188,7 @@ const ChatPreferenceSections: FC = () => {
   )
 
   const renderSection = (title: string, children: ReactNode) => (
-    <PageSettingGroup theme={theme}>
+    <PageSettingGroup theme={theme} className={sectionClassName}>
       <SettingTitle>{title}</SettingTitle>
       <SettingDivider />
       <SettingGroup>{children}</SettingGroup>
@@ -147,38 +200,16 @@ const ChatPreferenceSections: FC = () => {
       {renderSection(
         t('settings.messages.input.title'),
         <>
-          <SettingRow>
-            <SettingSwitch
-              checked={showInputEstimatedTokens}
-              onCheckedChange={setShowInputEstimatedTokens}
-              label={t('settings.messages.input.show_estimated_tokens')}
-            />
-          </SettingRow>
-          <SettingDivider />
-          <SettingRow>
-            <SettingSwitch
-              checked={renderInputMessageAsMarkdown}
-              onCheckedChange={setRenderInputMessageAsMarkdown}
-              label={t('settings.messages.markdown_rendering_input_message')}
-            />
-          </SettingRow>
-          <SettingDivider />
-          <SettingRow>
-            <SettingSwitch
-              checked={confirmDeleteMessage}
-              onCheckedChange={setConfirmDeleteMessage}
-              label={t('settings.messages.input.confirm_delete_message')}
-            />
-          </SettingRow>
-          <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-send-shortcuts" className="scroll-mt-6">
             <SettingRowTitleSmall>{t('settings.messages.input.send_shortcuts')}</SettingRowTitleSmall>
-            <Select value={sendMessageShortcut} onValueChange={setSendMessageShortcut}>
+            <Select
+              value={composerShortcutId(resolvedSendShortcut)}
+              onValueChange={setShortcutById(setSendMessageShortcut)}>
               <SelectTrigger size="sm" className="w-[220px] text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent className="text-sm">
-                {sendMessageShortcutItems.map((item) => (
+                {shortcutItemsExcluding(resolvedNewlineShortcut, resolvedSteerShortcut).map((item) => (
                   <SelectItem className="text-sm" key={item.value} value={item.value}>
                     {item.label}
                   </SelectItem>
@@ -186,16 +217,129 @@ const ChatPreferenceSections: FC = () => {
               </SelectContent>
             </Select>
           </SettingRow>
+          <SettingDivider />
+          <SettingRow id="setting-appearance-newline-shortcuts" className="scroll-mt-6">
+            <SettingRowTitleSmall>{t('settings.messages.input.newline_shortcuts')}</SettingRowTitleSmall>
+            <Select
+              value={composerShortcutId(resolvedNewlineShortcut)}
+              onValueChange={setShortcutById(setNewlineShortcut)}>
+              <SelectTrigger size="sm" className="w-[220px] text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="text-sm">
+                {shortcutItemsExcluding(resolvedSendShortcut, resolvedSteerShortcut).map((item) => (
+                  <SelectItem className="text-sm" key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </SettingRow>
+          <SettingDivider />
+          <SettingRow id="setting-appearance-steer-shortcuts" className="scroll-mt-6">
+            <SettingRowTitleSmall hint={t('settings.messages.input.steer_shortcuts_hint')}>
+              {t('settings.messages.input.steer_shortcuts')}
+            </SettingRowTitleSmall>
+            <Select value={composerShortcutId(resolvedSteerShortcut)} onValueChange={setShortcutById(setSteerShortcut)}>
+              <SelectTrigger size="sm" className="w-[220px] text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="text-sm">
+                {shortcutItemsExcluding(resolvedSendShortcut, resolvedNewlineShortcut).map((item) => (
+                  <SelectItem className="text-sm" key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </SettingRow>
+          <SettingDivider />
+          <SettingRow id="setting-appearance-spell-check" className="scroll-mt-6">
+            <Flex className="mr-4 flex-1 items-center justify-between">
+              <SettingRowTitleSmall>{t('settings.general.spell_check.label')}</SettingRowTitleSmall>
+              {enableSpellCheck && !isMac && (
+                <Selector<string>
+                  size={14}
+                  multiple
+                  value={spellCheckLanguages}
+                  placeholder={t('settings.general.spell_check.languages')}
+                  onChange={(selectedLanguages) => void setSpellCheckLanguages(selectedLanguages)}
+                  options={spellCheckLanguageOptions.map((lang) => ({
+                    value: lang.value,
+                    label: (
+                      <Flex className="items-center gap-2">
+                        <span role="img" aria-label={lang.flag}>
+                          {lang.flag}
+                        </span>
+                        {lang.label}
+                      </Flex>
+                    )
+                  }))}
+                />
+              )}
+            </Flex>
+            <Switch checked={enableSpellCheck} onCheckedChange={(checked) => void setEnableSpellCheck(checked)} />
+          </SettingRow>
+          <SettingDivider />
+          <SettingRow id="setting-appearance-show-estimated-tokens" className="scroll-mt-6">
+            <SettingSwitch
+              checked={showInputEstimatedTokens}
+              onCheckedChange={setShowInputEstimatedTokens}
+              label={t('settings.messages.input.show_estimated_tokens')}
+            />
+          </SettingRow>
+          <SettingDivider />
+          <SettingRow id="setting-appearance-markdown-rendering-input-message" className="scroll-mt-6">
+            <SettingSwitch
+              checked={renderInputMessageAsMarkdown}
+              onCheckedChange={setRenderInputMessageAsMarkdown}
+              label={t('settings.messages.markdown_rendering_input_message')}
+            />
+          </SettingRow>
+          <SettingDivider />
+          <SettingRow className="scroll-mt-6">
+            <SettingSwitch
+              checked={pasteLongTextAsFile}
+              onCheckedChange={setPasteLongTextAsFile}
+              label={t('settings.messages.input.paste_long_text_as_file')}
+            />
+          </SettingRow>
+          {pasteLongTextAsFile && (
+            <>
+              <SettingDivider />
+              <SettingRow>
+                <SettingRowTitleSmall>{t('settings.messages.input.paste_long_text_threshold')}</SettingRowTitleSmall>
+                <InputNumber
+                  size="small"
+                  className="w-20 text-sm"
+                  aria-label={t('settings.messages.input.paste_long_text_threshold')}
+                  min={500}
+                  max={10000}
+                  step={100}
+                  value={pasteLongTextThreshold}
+                  onBlur={(value) => setPasteLongTextThreshold(value ?? 500)}
+                />
+              </SettingRow>
+            </>
+          )}
+          <SettingDivider />
+          <SettingRow id="setting-appearance-confirm-delete-message" className="scroll-mt-6">
+            <SettingSwitch
+              checked={confirmDeleteMessage}
+              onCheckedChange={setConfirmDeleteMessage}
+              label={t('settings.messages.input.confirm_delete_message')}
+            />
+          </SettingRow>
         </>
       )}
       {renderSection(
         t('settings.messages.title'),
         <>
-          <SettingRow>
+          <SettingRow id="setting-appearance-wide-mode" className="scroll-mt-6">
             <SettingSwitch checked={wideMode} onCheckedChange={setWideMode} label={t('settings.messages.wide_mode')} />
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-use-serif-font" className="scroll-mt-6">
             <SettingSwitch
               checked={messageFont === 'serif'}
               onCheckedChange={(checked) => setMessageFont(checked ? 'serif' : 'system')}
@@ -203,7 +347,7 @@ const ChatPreferenceSections: FC = () => {
             />
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-thought-auto-collapse" className="scroll-mt-6">
             <SettingSwitch
               checked={thoughtAutoCollapse}
               onCheckedChange={setThoughtAutoCollapse}
@@ -212,7 +356,7 @@ const ChatPreferenceSections: FC = () => {
             />
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-show-message-outline" className="scroll-mt-6">
             <SettingSwitch
               checked={showMessageOutline}
               onCheckedChange={(checked) => setShowMessageOutline(checked)}
@@ -220,7 +364,7 @@ const ChatPreferenceSections: FC = () => {
             />
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-message-style" className="scroll-mt-6">
             <SettingRowTitleSmall>{t('message.message.style.label')}</SettingRowTitleSmall>
             <Select value={messageStyle} onValueChange={setMessageStyle}>
               <SelectTrigger size="sm" className="w-[220px] text-sm">
@@ -236,7 +380,7 @@ const ChatPreferenceSections: FC = () => {
             </Select>
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-multi-model-style" className="scroll-mt-6">
             <SettingRowTitleSmall>{t('message.message.multi_model_style.label')}</SettingRowTitleSmall>
             <Select value={multiModelMessageStyle} onValueChange={setMultiModelMessageStyle}>
               <SelectTrigger size="sm" className="w-[220px] text-sm">
@@ -259,7 +403,7 @@ const ChatPreferenceSections: FC = () => {
             </Select>
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-message-navigation" className="scroll-mt-6">
             <SettingRowTitleSmall>{t('settings.messages.navigation.label')}</SettingRowTitleSmall>
             <Select value={messageNavigation} onValueChange={setMessageNavigation}>
               <SelectTrigger size="sm" className="w-[220px] text-sm">
@@ -275,10 +419,10 @@ const ChatPreferenceSections: FC = () => {
             </Select>
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-message-font-size" className="scroll-mt-6">
             <SettingRowTitleSmall>{t('settings.font_size.title')}</SettingRowTitleSmall>
           </SettingRow>
-          <div className="w-full pt-(--cs-size-3xs)">
+          <div className="w-full pt-3">
             <Slider
               value={[fontSizeValue]}
               onValueChange={(values) => setFontSizeValue(values[0])}
@@ -298,7 +442,7 @@ const ChatPreferenceSections: FC = () => {
       {renderSection(
         t('settings.math.title'),
         <>
-          <SettingRow>
+          <SettingRow id="setting-appearance-math-single-dollar" className="scroll-mt-6">
             <SettingSwitch
               checked={mathEnableSingleDollar}
               onCheckedChange={setMathEnableSingleDollar}
@@ -311,7 +455,7 @@ const ChatPreferenceSections: FC = () => {
       {renderSection(
         t('chat.settings.code.title'),
         <>
-          <SettingRow>
+          <SettingRow id="setting-appearance-code-style" className="scroll-mt-6">
             <SettingRowTitleSmall>{t('message.message.code_style')}</SettingRowTitleSmall>
             <Select value={codeStyle} onValueChange={onCodeStyleChange}>
               <SelectTrigger size="sm" className="w-[220px] text-sm">
@@ -327,7 +471,7 @@ const ChatPreferenceSections: FC = () => {
             </Select>
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-code-fancy-block" className="scroll-mt-6">
             <SettingSwitch
               checked={codeFancyBlock}
               onCheckedChange={setCodeFancyBlock}
@@ -336,35 +480,7 @@ const ChatPreferenceSections: FC = () => {
             />
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
-            <SettingSwitch
-              checked={codeExecution.enabled}
-              onCheckedChange={(checked) => setCodeExecution({ enabled: checked })}
-              label={t('chat.settings.code_execution.title')}
-              hint={t('chat.settings.code_execution.tip')}
-            />
-          </SettingRow>
-          {codeExecution.enabled && (
-            <>
-              <SettingDivider />
-              <SettingRow className="pl-2">
-                <SettingRowTitleSmall hint={t('chat.settings.code_execution.timeout_minutes.tip')}>
-                  {t('chat.settings.code_execution.timeout_minutes.label')}
-                </SettingRowTitleSmall>
-                <EditableNumber
-                  size="small"
-                  className="w-20 text-sm"
-                  min={1}
-                  max={60}
-                  step={1}
-                  value={codeExecution.timeoutMinutes}
-                  onChange={(value) => setCodeExecution({ timeoutMinutes: value ?? 1 })}
-                />
-              </SettingRow>
-            </>
-          )}
-          <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-code-editor-enabled" className="scroll-mt-6">
             <SettingSwitch
               checked={codeEditor.enabled}
               onCheckedChange={(checked) => setCodeEditor({ enabled: checked })}
@@ -408,7 +524,7 @@ const ChatPreferenceSections: FC = () => {
             </>
           )}
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-show-line-numbers" className="scroll-mt-6">
             <SettingSwitch
               checked={codeShowLineNumbers}
               onCheckedChange={setCodeShowLineNumbers}
@@ -416,7 +532,7 @@ const ChatPreferenceSections: FC = () => {
             />
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-code-collapsible" className="scroll-mt-6">
             <SettingSwitch
               checked={codeCollapsible}
               onCheckedChange={setCodeCollapsible}
@@ -424,20 +540,11 @@ const ChatPreferenceSections: FC = () => {
             />
           </SettingRow>
           <SettingDivider />
-          <SettingRow>
+          <SettingRow id="setting-appearance-code-wrappable" className="scroll-mt-6">
             <SettingSwitch
               checked={codeWrappable}
               onCheckedChange={setCodeWrappable}
               label={t('chat.settings.code_wrappable')}
-            />
-          </SettingRow>
-          <SettingDivider />
-          <SettingRow>
-            <SettingSwitch
-              checked={codeImageTools}
-              onCheckedChange={setCodeImageTools}
-              label={t('chat.settings.code_image_tools.label')}
-              hint={t('chat.settings.code_image_tools.tip')}
             />
           </SettingRow>
         </>

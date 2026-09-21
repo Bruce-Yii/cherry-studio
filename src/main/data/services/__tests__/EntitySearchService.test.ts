@@ -1,3 +1,6 @@
+import { setupTestDatabase } from '@test-helpers/db'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
 import { agentTable } from '@data/db/schemas/agent'
 import { agentSessionTable } from '@data/db/schemas/agentSession'
 import { agentWorkspaceTable } from '@data/db/schemas/agentWorkspace'
@@ -13,8 +16,6 @@ import { generateOrderKeySequence } from '@data/services/utils/orderKey'
 import { ENTITY_SEARCH_MAX_LIMIT_PER_TYPE, EntitySearchQuerySchema } from '@shared/data/api/schemas/search'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@shared/data/types/assistant'
 import { createUniqueModelId } from '@shared/data/types/model'
-import { setupTestDatabase } from '@test-helpers/db'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 describe('EntitySearchService', () => {
   const dbh = setupTestDatabase()
@@ -99,16 +100,14 @@ describe('EntitySearchService', () => {
       fileProcessorId: null,
       chunkSize: 800,
       chunkOverlap: 120,
-      threshold: null,
-      documentCount: null,
-      searchMode: 'vector'
+      documentCount: null
     })
   }
 
   it('aggregates all supported entity types into read-model groups', async () => {
     await seedEntitySearchRows()
 
-    const result = await service.search(EntitySearchQuerySchema.parse({ q: 'Needle', limitPerType: 5 }))
+    const result = service.search(EntitySearchQuerySchema.parse({ q: 'Needle', limitPerType: 5 }))
 
     expect(result.query).toBe('Needle')
     expect(result).not.toHaveProperty('messageItems')
@@ -186,9 +185,7 @@ describe('EntitySearchService', () => {
       orderKey: 'a1'
     })
 
-    const result = await service.search(
-      EntitySearchQuerySchema.parse({ q: 'Needle', types: ['session'], limitPerType: 1 })
-    )
+    const result = service.search(EntitySearchQuerySchema.parse({ q: 'Needle', types: ['session'], limitPerType: 1 }))
 
     expect(result.groups).toHaveLength(1)
     expect(result.groups[0].type).toBe('session')
@@ -196,23 +193,32 @@ describe('EntitySearchService', () => {
   })
 
   it('fails the full query with type context when one entity type fails', async () => {
-    vi.spyOn(assistantDataService, 'search').mockRejectedValueOnce(new Error('database is busy'))
-    const agentSearch = vi.spyOn(agentService, 'search').mockResolvedValueOnce([])
+    vi.spyOn(assistantDataService, 'search').mockImplementationOnce(() => {
+      throw new Error('database is busy')
+    })
+    const agentSearch = vi.spyOn(agentService, 'search').mockReturnValueOnce([])
 
-    await expect(
+    let err: unknown
+    try {
       service.search(EntitySearchQuerySchema.parse({ q: 'Needle', types: ['assistant', 'agent'], limitPerType: 5 }))
-    ).rejects.toMatchObject({
+    } catch (e) {
+      err = e
+    }
+    expect(err).toMatchObject({
       code: 'INTERNAL_SERVER_ERROR',
       message: expect.stringContaining('entity search type assistant')
     })
 
-    expect(agentSearch).toHaveBeenCalled()
+    // Sync federated search fails fast: the first failing type (assistant) short-circuits
+    // the `types.map`, so later types are not attempted — the query still fails as a whole
+    // with type context, without wasting DB work on the remaining types.
+    expect(agentSearch).not.toHaveBeenCalled()
   })
 
   it('clamps direct service limitPerType above the maximum', async () => {
-    const assistantSearch = vi.spyOn(assistantDataService, 'search').mockResolvedValueOnce([])
+    const assistantSearch = vi.spyOn(assistantDataService, 'search').mockReturnValueOnce([])
 
-    await service.search({
+    service.search({
       q: 'Needle',
       types: ['assistant'],
       limitPerType: ENTITY_SEARCH_MAX_LIMIT_PER_TYPE + 1
@@ -243,9 +249,7 @@ describe('EntitySearchService', () => {
       updatedAt: freshUpdatedAt
     })
 
-    const result = await service.search(
-      EntitySearchQuerySchema.parse({ q: 'Needle', types: ['assistant'], limitPerType: 5 })
-    )
+    const result = service.search(EntitySearchQuerySchema.parse({ q: 'Needle', types: ['assistant'], limitPerType: 5 }))
 
     expect(result.groups[0].items.map((item) => item.id)).toEqual([
       '77777777-7777-4777-8777-777777777777',
@@ -271,7 +275,7 @@ describe('EntitySearchService', () => {
       updatedAt: freshUpdatedAt
     })
 
-    const result = await service.search(
+    const result = service.search(
       EntitySearchQuerySchema.parse({
         q: 'Needle',
         types: ['assistant'],
@@ -295,7 +299,7 @@ describe('EntitySearchService', () => {
   })
 
   it('returns empty item groups when no entity matches', async () => {
-    const result = await service.search(EntitySearchQuerySchema.parse({ q: 'missing', limitPerType: 2 }))
+    const result = service.search(EntitySearchQuerySchema.parse({ q: 'missing', limitPerType: 2 }))
 
     expect(result.groups.map((group) => [group.type, group.items])).toEqual([
       ['assistant', []],

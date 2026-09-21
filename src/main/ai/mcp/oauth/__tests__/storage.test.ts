@@ -1,7 +1,8 @@
-import type { OAuthClientInformation, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+
+import type { OAuthClientInformation, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { JsonFileStorage } from '../storage'
@@ -62,6 +63,23 @@ describe('JsonFileStorage round-trip', () => {
 
     const reader = new JsonFileStorage(serverUrlHash, configDir)
     await expect(reader.getCodeVerifier()).resolves.toBe('the-code-verifier')
+  })
+
+  it('round-trips the auth server URL', async () => {
+    const writer = new JsonFileStorage(serverUrlHash, configDir)
+    await writer.saveAuthServerUrl('https://auth.example.com')
+
+    const reader = new JsonFileStorage(serverUrlHash, configDir)
+    await expect(reader.getAuthServerUrl()).resolves.toBe('https://auth.example.com')
+  })
+
+  it('clearing the auth server URL reads back undefined', async () => {
+    const writer = new JsonFileStorage(serverUrlHash, configDir)
+    await writer.saveAuthServerUrl('https://auth.example.com')
+    await writer.saveAuthServerUrl(undefined)
+
+    const reader = new JsonFileStorage(serverUrlHash, configDir)
+    await expect(reader.getAuthServerUrl()).resolves.toBeUndefined()
   })
 
   it('preserves earlier fields when a later field is saved', async () => {

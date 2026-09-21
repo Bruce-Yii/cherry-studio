@@ -5,11 +5,14 @@
  * API only manages user preferences for default apps and full CRUD for custom apps.
  */
 
-import type { MiniApp } from '@shared/data/types/miniApp'
-import { MiniAppStatusSchema } from '@shared/data/types/miniApp'
 import * as z from 'zod'
 
+import type { MiniApp } from '@shared/data/types/miniApp'
+import { MiniAppStatusSchema } from '@shared/data/types/miniApp'
+import { UniqueModelIdSchema } from '@shared/data/types/model'
+
 import type { OrderEndpoints } from './_endpointHelpers'
+import { CreateLogoSchema } from './logo'
 
 /**
  * Permitted characters for a custom miniapp id. Exported so the v1→v2 migrator
@@ -18,10 +21,8 @@ import type { OrderEndpoints } from './_endpointHelpers'
  * v2 API would refuse to recreate.
  */
 export const MINI_APP_ID_REGEX = /^[A-Za-z0-9_-]+$/
-export const MINI_APP_LOGO_MAX_LENGTH = 1024 * 1024
 export const MINI_APP_ALLOWED_URL_PROTOCOLS = ['http:', 'https:', 'file:'] as const
 
-const MiniAppLogoSchema = z.string().min(1).max(MINI_APP_LOGO_MAX_LENGTH)
 export const MiniAppUrlSchema = z.string().min(1).refine(isAllowedMiniAppUrl, {
   message: 'url must be a valid http, https, or file URL'
 })
@@ -42,10 +43,11 @@ export const CreateMiniAppSchema = z.strictObject({
   appId: z.string().regex(MINI_APP_ID_REGEX, 'appId can only contain letters, numbers, underscore, and hyphen'),
   name: z.string().min(1),
   url: MiniAppUrlSchema,
-  // Logos are stored inline (data URLs / SVG / remote URLs) and end up in the
-  // SQLite row alongside the app metadata. Cap at 1 MiB to keep a runaway data
-  // URL from blowing up the row size and the SwR cache value.
-  logo: MiniAppLogoSchema
+  /**
+   * Custom logo — a preset key only (`{ kind: 'key', key }`). Uploaded images
+   * go through the `mini_app.settings.set_logo` IpcApi command, not this DTO.
+   */
+  logo: CreateLogoSchema.optional()
 })
 export type CreateMiniAppDto = z.infer<typeof CreateMiniAppSchema>
 
@@ -53,14 +55,20 @@ export type CreateMiniAppDto = z.infer<typeof CreateMiniAppSchema>
  * Zod schema for updating an existing miniapp.
  *
  * Preset rows may only update `status`; custom rows can also update their
- * user-editable fields. Reordering goes through the dedicated `/order`
+ * user-editable fields; installed (`kind='app'`) rows may only update `status`
+ * and their two model slots. Reordering goes through the dedicated `/order`
  * endpoints, not this PATCH.
  */
 export const UpdateMiniAppSchema = z.strictObject({
   status: MiniAppStatusSchema.optional(),
   name: z.string().min(1).optional(),
   url: MiniAppUrlSchema.optional(),
-  logo: MiniAppLogoSchema.optional()
+  // Logo edits (preset key / image upload / clear) go through the
+  // `mini_app.settings.set_logo` IpcApi command, not this PATCH body.
+  /** Installed apps only; `null` = follow the global default model. */
+  aiModelId: UniqueModelIdSchema.nullable().optional(),
+  /** Installed apps only; `null` = follow the global quick model. */
+  aiQuickModelId: UniqueModelIdSchema.nullable().optional()
 })
 export type UpdateMiniAppDto = z.infer<typeof UpdateMiniAppSchema>
 

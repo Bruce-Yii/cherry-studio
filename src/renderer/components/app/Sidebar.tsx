@@ -1,73 +1,82 @@
-import { usePersistCache } from '@data/hooks/useCache'
-import { usePreference } from '@data/hooks/usePreference'
-import { SIDEBAR_ICON_COMPONENTS } from '@renderer/components/app/sidebarIcons'
-import {
-  emitResourceListReveal,
-  type ResourceListRevealSource
-} from '@renderer/components/chat/resources/resourceListRevealEvents'
-import { useTabs } from '@renderer/hooks/tab'
-import useAvatar from '@renderer/hooks/useAvatar'
-import { getSidebarIconLabelKey } from '@renderer/i18n/label'
-import { getDefaultRouteTitle } from '@renderer/utils/routeTitle'
-import {
-  getOrderedVisibleSidebarFavorites,
-  getSidebarMenuPath,
-  resolveSidebarActiveItem
-} from '@renderer/utils/sidebar'
-import { clearTabInstanceMetadata } from '@renderer/utils/tabInstanceMetadata'
-import type { SidebarFavorite } from '@shared/data/preference/preferenceTypes'
+import { arrayMove } from '@dnd-kit/sortable'
+import { CircleOff, LoaderCircle, WifiOff } from 'lucide-react'
 import type { Ref } from 'react'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import { startTransition, useOptimistic } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { usePersistCache } from '@data/hooks/useCache'
+import { usePreference } from '@data/hooks/usePreference'
+import useAvatar from '@renderer/hooks/useAvatar'
+import { useSidebarShortcuts } from '@renderer/hooks/useSidebarShortcuts'
+import { openSettingsTab } from '@renderer/services/mainWindowNavigation'
+import { toast } from '@renderer/services/toast'
+
 import { SidebarShellActions } from '../layout/ShellTabBarActions'
-import UserPopup from '../Popups/UserPopup'
-import { Sidebar as UISidebar } from '../Sidebar'
-import { getSidebarDisplayWidth, getSidebarLayout, normalizeSidebarWidth } from '../Sidebar/constants'
-import { UserAvatar } from '../Sidebar/primitives'
-import type { SidebarMenuItem, SidebarUser, SidebarVisibleLayout } from '../Sidebar/types'
+import {
+  getSidebarDisplayWidth,
+  getSidebarLayout,
+  normalizeSidebarWidth,
+  type ResolvedSidebarEntry,
+  type SidebarIconPresentation,
+  type SidebarUser,
+  type SidebarVisibleLayout,
+  Sidebar as UISidebar,
+  UserAvatar
+} from '../Sidebar'
+import UserPopup from '../UserPopup'
+import {
+  useResolvedSidebarShortcuts,
+  useSidebarShortcutActivation,
+  useSidebarNavigationSnapshot,
+  useSidebarShortcutRegistry
+} from './sidebarShortcuts'
 
-const noop = () => {}
+const FeedbackDialog = lazy(() => import('../feedback/FeedbackDialog'))
 
-function getResourceListRevealSource(menuItemId: SidebarFavorite): ResourceListRevealSource | null {
-  if (menuItemId === 'assistants' || menuItemId === 'agents') return menuItemId
-  return null
+function applyEntryOrder(entries: ResolvedSidebarEntry[], orderedKeys: readonly string[]): ResolvedSidebarEntry[] {
+  const byKey = new Map(entries.map((entry) => [entry.key, entry]))
+  const optimisticKeys = new Set(orderedKeys)
+  return [
+    ...orderedKeys.flatMap((key) => {
+      const entry = byKey.get(key)
+      return entry ? [entry] : []
+    }),
+    ...entries.filter((entry) => !optimisticKeys.has(entry.key))
+  ]
 }
 
-export default function Sidebar({ ref }: { ref?: Ref<HTMLDivElement | null> }) {
+export default function Sidebar({
+  ref,
+  isFullscreen = false
+}: {
+  ref?: Ref<HTMLDivElement | null>
+  isFullscreen?: boolean
+}) {
   const { t } = useTranslation()
   const [userName] = usePreference('app.user.name')
-  const [sidebarFavorites] = usePreference('ui.sidebar.favorites')
-  const { activeTab, updateTab, openTab } = useTabs()
-  const [defaultPaintingProvider] = usePreference('feature.paintings.default_provider')
+  const { shortcuts, remove, reorder } = useSidebarShortcuts()
+  const registry = useSidebarShortcutRegistry()
+  const resolutions = useResolvedSidebarShortcuts(shortcuts, registry)
+  const activateShortcut = useSidebarShortcutActivation()
+  const navigation = useSidebarNavigationSnapshot()
 
-  // Sidebar width — persisted across restarts. Dragging through the
-  // intermediate 50-120px range uses a local preview width so the UI can
-  // follow the cursor without persisting unstable widths.
   const [sidebarWidth, setSidebarWidth] = usePersistCache('ui.sidebar.width')
   const [previewSidebarWidth, setPreviewSidebarWidth] = useState<number | null>(null)
+  const [feedbackDialogMounted, setFeedbackDialogMounted] = useState(false)
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
   const activeSidebarWidth = previewSidebarWidth ?? sidebarWidth
 
   useLayoutEffect(() => {
     document.documentElement.style.setProperty('--sidebar-width', `${getSidebarDisplayWidth(activeSidebarWidth)}px`)
   }, [activeSidebarWidth])
 
-  // Migration, not dead code: the resize path only persists normalized widths,
-  // but older builds (three-state layout, default 65) persisted intermediate
-  // values that must be collapsed once on load. Writing derived state back
-  // cannot loop — normalizeSidebarWidth is idempotent and the write is guarded
-  // by the inequality check. Skip while a drag preview is active so the
-  // write-back does not clobber it.
   useEffect(() => {
     if (previewSidebarWidth !== null) return
-
     const normalizedWidth = normalizeSidebarWidth(sidebarWidth)
-    if (normalizedWidth !== sidebarWidth) {
-      setSidebarWidth(normalizedWidth)
-    }
+    if (normalizedWidth !== sidebarWidth) setSidebarWidth(normalizedWidth)
   }, [previewSidebarWidth, setSidebarWidth, sidebarWidth])
 
-  // User avatar
   const avatar = useAvatar()
   const sidebarUser = useMemo<SidebarUser>(
     () => ({
@@ -78,103 +87,124 @@ export default function Sidebar({ ref }: { ref?: Ref<HTMLDivElement | null> }) {
     [avatar, t, userName]
   )
   const sidebarLogo = useMemo(
-    () => (
-      <button
-        type="button"
-        aria-label={sidebarUser.name}
-        onClick={sidebarUser.onClick}
-        className="flex h-full w-full items-center justify-center rounded-full [-webkit-app-region:no-drag]">
-        <UserAvatar user={sidebarUser} className="h-full w-full" ring={false} />
-      </button>
-    ),
+    () => <UserAvatar user={sidebarUser} className="h-full w-full" ring={false} />,
     [sidebarUser]
   )
 
-  // Floating sidebar (hover reveal when hidden)
   const [hoverVisible, setHoverVisible] = useState(false)
   const layout = getSidebarLayout(activeSidebarWidth)
-
-  // Menu items
-  const pathname = activeTab?.url || '/'
-
-  const items = useMemo<SidebarMenuItem[]>(
+  const resolvedEntries = useMemo(
     () =>
-      getOrderedVisibleSidebarFavorites(sidebarFavorites).flatMap((icon) => {
-        const path = getSidebarMenuPath(icon, defaultPaintingProvider)
-        const Icon = SIDEBAR_ICON_COMPONENTS[icon]
-        if (!path || !Icon) {
-          return []
+      resolutions.map((resolution) => {
+        const { shortcut } = resolution
+        const provider = registry.resolve(shortcut.target)
+        const isResolved = resolution.status === 'resolved'
+        const label = isResolved
+          ? resolution.resource.label
+          : shortcut.fallbackLabel || shortcut.target.locator.resourceId
+        const renderIcon = isResolved
+          ? resolution.resource.renderIcon
+          : ({ glyphSize }: SidebarIconPresentation) => {
+              const Icon =
+                resolution.status === 'loading' ? LoaderCircle : resolution.status === 'missing' ? CircleOff : WifiOff
+              return (
+                <Icon
+                  size={glyphSize}
+                  strokeWidth={1.6}
+                  className={resolution.status === 'loading' ? 'animate-spin' : undefined}
+                />
+              )
+            }
+        const activate = (inNewTab = false) => {
+          if (!isResolved || !provider) return
+          void activateShortcut(provider, shortcut.target, resolution.resource, inNewTab).catch(() =>
+            toast.error(t('common.error'))
+          )
         }
-        return [
-          {
-            id: icon,
-            label: t(getSidebarIconLabelKey(icon)),
-            icon: Icon
-          }
-        ]
+        const activateInNewTab =
+          isResolved && provider && resolution.resource.supportsNewTab ? () => activate(true) : undefined
+
+        return {
+          key: shortcut.id,
+          label,
+          renderIcon,
+          disabled: !isResolved || !provider,
+          isActive: !!provider?.isActive?.(shortcut.target, navigation),
+          statusLabel: isResolved
+            ? undefined
+            : resolution.status === 'loading'
+              ? t('common.loading')
+              : resolution.status === 'missing'
+                ? t('sidebar.resource_missing')
+                : t('sidebar.resource_unavailable'),
+          onOpen: () => activate(),
+          onOpenNewTab: activateInNewTab,
+          contextMenuItems: [
+            ...(activateInNewTab
+              ? [
+                  {
+                    type: 'item' as const,
+                    id: `sidebar.open-in-new-tab.${shortcut.id}`,
+                    label: t('common.open_in_new_tab'),
+                    onSelect: activateInNewTab
+                  }
+                ]
+              : []),
+            {
+              type: 'item' as const,
+              id: `sidebar.remove.${shortcut.id}`,
+              label: t('launchpad.unpin_from_sidebar'),
+              onSelect: () => remove(shortcut.target)
+            }
+          ]
+        }
       }),
-    [defaultPaintingProvider, sidebarFavorites, t]
+    [activateShortcut, navigation, registry, remove, resolutions, shortcuts, t]
   )
+  const [entries, setOptimisticEntryOrder] = useOptimistic(resolvedEntries, applyEntryOrder)
 
-  const activeItem = resolveSidebarActiveItem(pathname)
-
-  const handleNavigate = useCallback(
-    (menuItemId: string) => {
-      const menuId = menuItemId as SidebarFavorite
-      const path = getSidebarMenuPath(menuId, defaultPaintingProvider)
-      if (!path || activeTab?.url === path) return
-
-      const title = getDefaultRouteTitle(path)
-      const revealSource = getResourceListRevealSource(menuId)
-
-      if (activeTab?.isPinned) {
-        const openedId = openTab(path, { forceNew: true, title })
-        if (revealSource) {
-          emitResourceListReveal({ source: revealSource, tabId: openedId })
-        }
-        return
-      }
-
-      if (activeTab) {
-        updateTab(activeTab.id, {
-          url: path,
-          title,
-          icon: undefined,
-          metadata: clearTabInstanceMetadata(activeTab.metadata)
-        })
-        if (revealSource) {
-          emitResourceListReveal({ source: revealSource, tabId: activeTab.id })
-        }
-        return
-      }
-
-      const openedId = openTab(path, { forceNew: true, title })
-      if (revealSource) {
-        emitResourceListReveal({ source: revealSource, tabId: openedId })
-      }
+  const handleReorder = useCallback(
+    ({ oldIndex, newIndex }: { oldIndex: number; newIndex: number }) => {
+      if (oldIndex === newIndex) return
+      const byId = new Map(shortcuts.map((shortcut) => [shortcut.id, shortcut]))
+      const reorderedEntries = arrayMove(entries, oldIndex, newIndex)
+      const reorderedShortcuts = reorderedEntries.flatMap((entry) => {
+        const shortcut = byId.get(entry.key)
+        return shortcut ? [shortcut] : []
+      })
+      startTransition(async () => {
+        setOptimisticEntryOrder(reorderedEntries.map((entry) => entry.key))
+        await reorder(reorderedShortcuts).catch(() => undefined)
+      })
     },
-    [activeTab, updateTab, openTab, defaultPaintingProvider]
+    [entries, reorder, setOptimisticEntryOrder, shortcuts]
   )
-  const handleOpenSettingsTab = useCallback(() => {
-    openTab('/settings/provider', { title: t('settings.title') })
-  }, [openTab, t])
 
-  // Common props shared between normal and floating sidebar
+  const handleOpenSettingsTab = useCallback(() => openSettingsTab(), [])
+  const handleOpenFeedback = useCallback(() => {
+    setFeedbackDialogMounted(true)
+    setFeedbackOpen(true)
+  }, [])
+
   const sidebarProps = {
-    activeItem,
-    items,
+    isFullscreen,
+    entries,
     title: sidebarUser.name,
     logo: sidebarLogo,
-    actions: (footerLayout: SidebarVisibleLayout) => (
-      <SidebarShellActions layout={footerLayout} onSettingsClick={handleOpenSettingsTab} />
+    onHeaderClick: sidebarUser.onClick,
+    actions: (footerLayout: SidebarVisibleLayout, onOverlayOpenChange?: (open: boolean) => void) => (
+      <SidebarShellActions
+        layout={footerLayout}
+        onFeedbackClick={handleOpenFeedback}
+        onSettingsClick={handleOpenSettingsTab}
+        onOverlayOpenChange={onOverlayOpenChange}
+      />
     ),
-    dockedTabs: [],
-    onItemClick: handleNavigate,
-    onCloseDockedTab: noop
+    onEntriesReorder: handleReorder
   }
 
   return (
-    <div ref={ref} id="app-sidebar" className="relative h-full [-webkit-app-region:no-drag]">
+    <div ref={ref} id="app-sidebar" data-ui="app.sidebar" className="relative h-full [-webkit-app-region:no-drag]">
       <UISidebar
         width={activeSidebarWidth}
         setWidth={setSidebarWidth}
@@ -191,6 +221,11 @@ export default function Sidebar({ ref }: { ref?: Ref<HTMLDivElement | null> }) {
           {...sidebarProps}
         />
       )}
+      {feedbackDialogMounted ? (
+        <Suspense fallback={null}>
+          <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
+        </Suspense>
+      ) : null}
     </div>
   )
 }

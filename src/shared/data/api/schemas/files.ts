@@ -1,22 +1,24 @@
 /**
  * File API Schema definitions (read-only DataApi)
  *
- * DataApi is a **pure SQL read surface** for file data. Handlers:
+ * DataApi is a SQL-first read surface for file data. Handlers:
  *
  * - MUST NOT read or `stat` the filesystem
  * - MUST NOT call main-side resolvers (`resolvePhysicalPath`, etc.)
- * - MUST NOT consult in-memory caches outside the DB (no `danglingCache.check`, no `versionCache`)
+ * - MUST NOT consult FS-state caches (`danglingCache.check`, `versionCache`)
  * - MUST return a **fixed shape per endpoint** — no opt-in flags that toggle extra fields
  *
- * The only allowed "derivation" inside DataApi is **SQL aggregation** (JOIN / GROUP BY /
- * COUNT), because that stays in the DB layer. Anything that requires FS IO or main-side
- * computation lives in **File IPC** (see `src/shared/types/file/ipc.ts`).
+ * SQL aggregation (JOIN / GROUP BY / COUNT) stays in the DB layer, over the persistent
+ * association tables registered in `persistentFileRefTablesBySourceType`.
+ * Anything that requires FS IO or main-side path computation lives in **File IPC** (see
+ * `src/shared/types/file/ipc.ts`).
  *
  * Endpoints:
  * - `GET /files/entries`            — FileEntry list (fixed shape)
  * - `GET /files/entries/:id`        — Single entry lookup (fixed shape)
+ * - `GET /files/entries/by-content-hash` — Active internal exact-hash candidates
  * - `GET /files/entries/stats`      — Pure-SQL aggregate counts for sidebar filters
- * - `GET /files/entries/ref-counts` — Pure-SQL ref-count aggregation for a batch of ids
+ * - `GET /files/entries/ref-counts` — Ref-count aggregation for a batch of ids (persistent SQL refs)
  * - `GET /files/entries/:id/refs`   — File references for a specific entry
  * - `GET /files/refs`               — File references filtered by business source
  *
@@ -29,10 +31,10 @@
  *
  * | Former opt-in       | Current home                                                           |
  * |---------------------|------------------------------------------------------------------------|
- * | `includeRefCount`   | `GET /files/entries/ref-counts?entryIds=...` (still DataApi, dedicated)|
+ * | `includeRefCount`   | `GET /files/entries/ref-counts?entryIds=...` (DataApi; persistent refs)                          |
  * | `includeDangling`   | File IPC `getDanglingState` / `batchGetDanglingStates` (FS-backed)     |
  * | `includePath`       | File IPC `getPhysicalPath` / `batchGetPhysicalPaths` (main resolver)   |
- * | `includeUrl`        | Shared pure helper `toSafeFileUrl(path, ext)` in `@shared/utils/file/url`, composed in-process from the `FilePath` returned by `getPhysicalPath` (no dedicated IPC) |
+ * | `includeUrl`        | Shared pure helper `toSafeFileUrl(path, ext)` in `@shared/utils/file/url`, composed in-process from the `AbsoluteFilePath` returned by `getPhysicalPath` (no dedicated IPC) |
  *
  * Renderers compose data by fetching the entry list here, then calling the relevant
  * batch IPC methods with the retrieved ids. Wrap the two-step pattern in a dedicated
@@ -47,15 +49,23 @@
  * call File IPC `getMetadata(id)` which performs a single `fs.stat`.
  */
 
-import type { CursorPaginationParams, CursorPaginationResponse } from '@shared/data/api/apiTypes'
-import type { FileEntry, FileEntryId, FileRef } from '@shared/data/types/file'
-import { FileEntryIdSchema, FileEntryOriginSchema, FileRefSourceTypeSchema } from '@shared/data/types/file'
 import * as z from 'zod'
+
+import type { CursorPaginationParams, CursorPaginationResponse } from '@shared/data/api/types'
+import type { FileEntry, FileEntryId, FileRef } from '@shared/data/types/file'
+import {
+  ContentHashSchema,
+  FileEntryIdSchema,
+  FileEntryOriginSchema,
+  FileRefSourceTypeSchema
+} from '@shared/data/types/file'
+import { FileTypeSchema } from '@shared/types/file'
 
 /**
  * Per-entry reference-count record produced by `GET /files/entries/ref-counts`.
  *
- * Pure SQL aggregation (`SELECT fileEntryId, COUNT(*) FROM file_ref GROUP BY fileEntryId`).
+ * Ref aggregation across the persistent association tables registered in
+ * `persistentFileRefTablesBySourceType`.
  * Entries with zero refs are still returned with `refCount = 0` so the renderer can
  * safely map by id without special-casing missing keys.
  */
@@ -80,8 +90,10 @@ export const REF_COUNTS_MAX_ENTRY_IDS = 500
 
 export const ListFilesQuerySchema = z
   .strictObject({
+    ids: z.array(FileEntryIdSchema).min(1).max(LIST_FILES_MAX_LIMIT).optional(),
     origin: FileEntryOriginSchema.optional(),
     inTrash: z.boolean().optional(),
+    fileType: FileTypeSchema.optional(),
     sortBy: z.enum(['name', 'createdAt', 'updatedAt', 'size', 'ext']).optional(),
     sortOrder: z.enum(['asc', 'desc']).optional(),
     cursor: z.string().optional(),
@@ -93,6 +105,9 @@ export const ListFilesQuerySchema = z
   )
 export type ListFilesQueryParams = z.input<typeof ListFilesQuerySchema> & CursorPaginationParams
 export type ListFilesQuery = z.output<typeof ListFilesQuerySchema>
+
+export const ContentHashQuerySchema = z.strictObject({ contentHash: ContentHashSchema })
+export type ContentHashQueryParams = z.input<typeof ContentHashQuerySchema>
 
 export interface FileEntryListResponse extends CursorPaginationResponse<FileEntry> {
   total: number
@@ -177,6 +192,14 @@ export type FileSchemas = {
     }
   }
 
+  /** Active internal entries with an exact tagged content hash, oldest first. */
+  '/files/entries/by-content-hash': {
+    GET: {
+      query: ContentHashQueryParams
+      response: FileEntry[]
+    }
+  }
+
   /**
    * Aggregate counts for the file sidebar.
    *
@@ -196,8 +219,9 @@ export type FileSchemas = {
   /**
    * Batch ref-count aggregation for a set of entry ids.
    *
-   * Pure SQL (`COUNT(*) ... GROUP BY fileEntryId`). Each requested id appears in the
-   * response — entries with zero refs return `refCount = 0` rather than being omitted.
+   * Counts persistent SQL association-table refs (`COUNT(*) ... GROUP BY fileEntryId`).
+   * Each requested id appears
+   * in the response — entries with zero refs return `refCount = 0` rather than being omitted.
    *
    * @example GET /files/entries/ref-counts?entryIds=abc123,def456
    */
@@ -229,8 +253,8 @@ export type FileSchemas = {
    * (`z.strictObject` — neither is optional), so the URL always carries the
    * full source key even though the path stays a plain `/files/refs`.
    *
-   * Ref write operations (create / cleanup) are NOT exposed via DataApi.
-   * Business services call fileRefService directly; Renderer does not manage refs.
+   * Ref write operations are NOT exposed via DataApi — persistent refs are
+   * owned by their business services.
    *
    * @example GET /files/refs?sourceType=chat_message&sourceId=msg1
    */

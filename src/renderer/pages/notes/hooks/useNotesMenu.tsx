@@ -1,15 +1,15 @@
-import { useMultiplePreferences } from '@data/hooks/usePreference'
-import { loggerService } from '@logger'
-import type { CommandContextMenuExtraItem } from '@renderer/components/command'
-import { DeleteIcon } from '@renderer/components/Icons'
-import ObsidianExportPopup from '@renderer/components/Popups/ObsidianExportPopup'
-import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
-import { useKnowledgeBases } from '@renderer/hooks/useKnowledgeBase'
-import { exportNote } from '@renderer/services/ExportService'
-import type { NotesTreeNode } from '@renderer/types/note'
 import { Edit3, FilePlus, FileSearch, Folder, FolderOpen, Sparkles, Star, StarOff, UploadIcon } from 'lucide-react'
 import { useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
+
+import { useMultiplePreferences } from '@data/hooks/usePreference'
+import { loggerService } from '@logger'
+import type { CommandContextMenuExtraItem } from '@renderer/components/command'
+import DeleteIcon from '@renderer/components/icons/DeleteIcon'
+import { ipcApi } from '@renderer/ipc'
+import { popup } from '@renderer/services/popup'
+import { toast } from '@renderer/services/toast'
+import type { NotesTreeNode } from '@renderer/types/note'
 
 const logger = loggerService.withContext('UseNotesMenu')
 
@@ -38,7 +38,6 @@ export const useNotesMenu = ({
   activeNode
 }: UseNotesMenuProps) => {
   const { t } = useTranslation()
-  const { bases } = useKnowledgeBases()
   const [exportMenuOptions] = useMultiplePreferences({
     docx: 'data.export.menus.docx',
     image: 'data.export.menus.image',
@@ -53,36 +52,36 @@ export const useNotesMenu = ({
   const handleExportKnowledge = useCallback(
     async (note: NotesTreeNode) => {
       try {
-        if (bases.length === 0) {
-          window.toast.warning(t('chat.save.knowledge.empty.no_knowledge_base'))
-          return
-        }
-
+        const { default: SaveToKnowledgePopup } = await import('@renderer/components/SaveToKnowledgePopup')
         const result = await SaveToKnowledgePopup.showForNote(note)
 
         if (result?.success) {
-          window.toast.success(t('notes.export_success', { count: result.savedCount }))
+          toast.success(t('notes.export_success', { count: result.savedCount }))
         }
       } catch (error) {
-        window.toast.error(t('notes.export_failed'))
+        toast.error(t('notes.export_failed'))
         logger.error(`Failed to export note to knowledge base: ${error}`)
       }
     },
-    [bases.length, t]
+    [t]
   )
 
   const handleImageAction = useCallback(
     async (node: NotesTreeNode, platform: 'copyImage' | 'exportImage') => {
       try {
+        const exportServicePromise = import('@renderer/services/ExportService')
+        let selectionReady = Promise.resolve()
+
         if (activeNode?.id !== node.id) {
           onSelectNode(node)
-          await new Promise((resolve) => setTimeout(resolve, 500))
+          selectionReady = new Promise((resolve) => setTimeout(resolve, 500))
         }
 
+        const [{ exportNote }] = await Promise.all([exportServicePromise, selectionReady])
         await exportNote({ node, platform })
       } catch (error) {
         logger.error(`Failed to ${platform === 'copyImage' ? 'copy' : 'export'} as image:`, error as Error)
-        window.toast.error(t('common.copy_failed'))
+        toast.error(t('common.copy_failed'))
       }
     },
     [activeNode, onSelectNode, t]
@@ -94,33 +93,36 @@ export const useNotesMenu = ({
         await fn()
       } catch (error) {
         logger.error('note export failed', error as Error)
-        window.toast.error(t('notes.export_failed'))
+        toast.error(t('notes.export_failed'))
       }
     },
     [t]
   )
 
   const handleObsidianExport = useCallback(async (node: NotesTreeNode) => {
-    const content = await window.api.file.readExternal(node.externalPath)
+    const [content, { default: ObsidianExportPopup }] = await Promise.all([
+      window.api.file.readExternal(node.externalPath),
+      import('@renderer/components/ObsidianExportPopup')
+    ])
     await ObsidianExportPopup.show({ title: node.name, processingMethod: '1', rawContent: content })
   }, [])
 
   const handleDeleteNodeWrapper = useCallback(
-    (node: NotesTreeNode) => {
+    async (node: NotesTreeNode) => {
       const confirmText =
         node.type === 'folder'
           ? t('notes.delete_folder_confirm', { name: node.name })
           : t('notes.delete_note_confirm', { name: node.name })
 
-      window.modal.confirm({
+      const confirmed = await popup.confirm({
         title: t('notes.delete'),
         content: confirmText,
         centered: true,
-        okButtonProps: { danger: true },
-        onOk: () => {
-          onDeleteNode(node.id)
-        }
+        okButtonProps: { danger: true }
       })
+      if (!confirmed) return
+
+      onDeleteNode(node.id)
     },
     [onDeleteNode, t]
   )
@@ -167,14 +169,16 @@ export const useNotesMenu = ({
           id: 'notes.rename',
           label: t('notes.rename'),
           icon: <Edit3 size={14} />,
-          onSelect: () => handleStartEdit(node)
+          onSelect: () => {
+            window.requestAnimationFrame(() => handleStartEdit(node))
+          }
         },
         {
           type: 'item',
           id: 'notes.open-outside',
           label: t('notes.open_outside'),
           icon: <FolderOpen size={14} />,
-          onSelect: () => void window.api.openPath(node.externalPath)
+          onSelect: () => void ipcApi.request('system.shell.open_path', node.externalPath)
         }
       )
 
@@ -206,7 +210,11 @@ export const useNotesMenu = ({
             type: 'item',
             id,
             label,
-            onSelect: () => void runExport(() => exportNote({ node, platform }))
+            onSelect: () =>
+              void runExport(async () => {
+                const { exportNote } = await import('@renderer/services/ExportService')
+                return exportNote({ node, platform })
+              })
           })
         if (exportMenuOptions.image) {
           exportChildren.push(

@@ -7,11 +7,31 @@ export type QuickPanelTriggerInfo = {
   originalText?: string
 }
 
+export interface QuickPanelInsertTextOptions {
+  /** Default true — turn `${name}` in the inserted text into prompt-variable chips. */
+  tokenizeVariables?: boolean
+}
+
+export interface QuickPanelInsertTokenOptions {
+  /**
+   * Default true — append a space after the chip, which is what a standalone pick (a skill, a
+   * knowledge base) wants. Pass false when the chip sits inside surrounding text the caller is
+   * reproducing verbatim, so `Hello ${name}!` does not become `Hello ${name} !`.
+   */
+  insertSeparator?: boolean
+}
+
 export interface QuickPanelInputAdapter {
   getText: () => string
   getCursorOffset?: () => number
-  insertText: (text: string) => void
-  insertToken?: (token: unknown) => void
+  /**
+   * Inserts at the cursor. By default `${name}` markers in the text become editable prompt-variable
+   * chips (quick phrases rely on it). Pass `tokenizeVariables: false` for text from a source that
+   * did not author those markers as fields — a rendered MCP prompt whose body may contain a shell
+   * `${HOME}` — so it stays literal.
+   */
+  insertText: (text: string, options?: QuickPanelInsertTextOptions) => void
+  insertToken?: (token: unknown, options?: QuickPanelInsertTokenOptions) => void
   deleteTriggerRange: (range: { from: number; to: number }) => void
   focus: () => void
   subscribeInput?: (listener: (event?: QuickPanelInputEvent) => void) => () => void
@@ -63,6 +83,8 @@ export type QuickPanelOpenOptions = {
   title?: string
   /** default: [] */
   list: QuickPanelListItem[]
+  /** Compact actions rendered in the panel footer, outside search and result scrolling. */
+  footerActions?: QuickPanelFooterAction[]
   /** default: 0 */
   defaultIndex?: number
   /** default: 7 */
@@ -82,6 +104,8 @@ export type QuickPanelOpenOptions = {
   queryAnchor?: number
   /** Whether this panel tracks and consumes an input trigger query such as `/foo` or `@file`. */
   trackInputQuery?: boolean
+  /** Initial tracked search text for panels opened from buttons without inserting query text into the input. */
+  initialSearchText?: string
   beforeAction?: (options: QuickPanelCallBackOptions) => void
   afterAction?: (options: QuickPanelCallBackOptions) => void
   onClose?: (options: QuickPanelCallBackOptions) => void
@@ -100,11 +124,18 @@ export type QuickPanelListItem = {
   id?: string
   label: React.ReactNode | string
   description?: React.ReactNode | string
+  tooltip?: React.ReactNode | string
+  /** In-row element used as the controlled Tooltip trigger. */
+  tooltipAnchor?: React.ReactElement
   /**
-   * Since title and description can be ReactNode values, provide separate text
-   * for search filtering. This can combine the title and description strings.
+   * Extra searchable text for items whose visible label/description are not
+   * enough or are not plain strings. The default filter treats this as additive
+   * with string labels and descriptions; custom filters may choose narrower
+   * semantics.
    */
   filterText?: string
+  /** Extra searchable aliases that are not rendered in the panel. */
+  searchAliases?: readonly string[]
   icon: React.ReactNode | string
   suffix?: React.ReactNode | string
   isSelected?: boolean
@@ -118,7 +149,20 @@ export type QuickPanelListItem = {
    * when there are no matches.
    */
   alwaysVisible?: boolean
+  /** Keep the current panel open after this item's action runs. */
+  keepOpenOnAction?: boolean
   action?: (options: QuickPanelCallBackOptions) => void
+}
+
+export type QuickPanelFooterAction = Pick<
+  QuickPanelListItem,
+  'action' | 'disabled' | 'icon' | 'keepOpenOnAction' | 'label' | 'tooltip'
+> & {
+  id: string
+  ariaLabel: string
+  /** Hide this action while the panel has a search query. */
+  hideWhenSearching?: boolean
+  action: NonNullable<QuickPanelListItem['action']>
 }
 
 // Context type definition.
@@ -127,9 +171,11 @@ export interface QuickPanelContextType {
   readonly close: (action?: QuickPanelCloseAction, searchText?: string) => void
   readonly updateItemSelection: (targetItem: QuickPanelListItem, isSelected: boolean) => void
   readonly updateList: (newList: QuickPanelListItem[]) => void
+  readonly updateFooterActions: (actions: QuickPanelFooterAction[]) => void
   readonly isVisible: boolean
   readonly symbol: string
   readonly list: QuickPanelListItem[]
+  readonly footerActions?: QuickPanelFooterAction[]
   readonly title?: string
   readonly defaultIndex: number
   readonly pageSize: number
@@ -138,6 +184,7 @@ export interface QuickPanelContextType {
   readonly triggerInfo?: QuickPanelTriggerInfo
   readonly queryAnchor?: number
   readonly trackInputQuery?: boolean
+  readonly initialSearchText?: string
   readonly parentPanel?: QuickPanelOpenOptions
   readonly manageListExternally?: boolean
   readonly lastCloseAction?: QuickPanelCloseAction

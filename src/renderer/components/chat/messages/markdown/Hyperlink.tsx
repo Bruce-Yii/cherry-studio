@@ -1,15 +1,23 @@
-import { Popover, PopoverContent, PopoverTrigger } from '@cherrystudio/ui'
+import React, { memo, useMemo, useRef, useState } from 'react'
+
+import { HoverCard, HoverCardContent, HoverCardTrigger } from '@cherrystudio/ui'
 import { OgCard } from '@renderer/components/OgCard'
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 interface HyperLinkProps {
   children: React.ReactNode
   href: string
 }
 
+const HYPERLINK_CARD_OPEN_DELAY = 500
+const HYPERLINK_CARD_CLOSE_DELAY = 100
+
 const Hyperlink: React.FC<HyperLinkProps> = ({ children, href }) => {
   const [open, setOpen] = useState(false)
-  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const contextMenuRequested = useRef(false)
+  const dismissPreview = () => {
+    contextMenuRequested.current = true
+    setOpen(false)
+  }
 
   const link = useMemo(() => {
     try {
@@ -19,45 +27,34 @@ const Hyperlink: React.FC<HyperLinkProps> = ({ children, href }) => {
     }
   }, [href])
 
-  const clearCloseTimer = useCallback(() => {
-    if (closeTimerRef.current) {
-      clearTimeout(closeTimerRef.current)
-      closeTimerRef.current = null
-    }
-  }, [])
-
-  const openPopover = useCallback(() => {
-    clearCloseTimer()
-    setOpen(true)
-  }, [clearCloseTimer])
-
-  const closePopover = useCallback(() => {
-    clearCloseTimer()
-    closeTimerRef.current = setTimeout(() => {
-      setOpen(false)
-      closeTimerRef.current = null
-    }, 100)
-  }, [clearCloseTimer])
-
-  useEffect(() => clearCloseTimer, [clearCloseTimer])
-
   if (!href) return children
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <span className="inline" onMouseEnter={openPopover} onMouseLeave={closePopover}>
+    <HoverCard
+      open={open}
+      openDelay={HYPERLINK_CARD_OPEN_DELAY}
+      closeDelay={HYPERLINK_CARD_CLOSE_DELAY}
+      onOpenChange={(nextOpen) => setOpen(nextOpen && !contextMenuRequested.current)}>
+      <HoverCardTrigger asChild>
+        <span
+          className="inline"
+          onPointerEnter={() => {
+            contextMenuRequested.current = false
+          }}
+          onPointerDown={(event) => {
+            if (event.button === 2) dismissPreview()
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Tab') contextMenuRequested.current = false
+          }}
+          onContextMenu={dismissPreview}>
           {children}
         </span>
-      </PopoverTrigger>
-      <PopoverContent
-        className="w-auto max-w-none overflow-hidden rounded-lg p-0"
-        sideOffset={0}
-        onMouseEnter={openPopover}
-        onMouseLeave={closePopover}>
+      </HoverCardTrigger>
+      <HoverCardContent className="w-auto max-w-none overflow-hidden rounded-lg p-0" sideOffset={0}>
         <OgCard link={link} show={open} />
-      </PopoverContent>
-    </Popover>
+      </HoverCardContent>
+    </HoverCard>
   )
 }
 

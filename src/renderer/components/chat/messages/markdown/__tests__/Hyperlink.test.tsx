@@ -1,222 +1,117 @@
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import Hyperlink from '../Hyperlink'
 
-const mocks = vi.hoisted(() => ({
-  Favicon: ({ hostname, alt }: { hostname: string; alt: string }) => (
-    <img data-testid="favicon" data-hostname={hostname} alt={alt} />
-  ),
-  useMetaDataParser: vi.fn(() => ({
-    metadata: {},
-    isLoading: false,
-    isLoaded: true,
-    parseMetadata: vi.fn()
-  }))
+const { parseMetadata, metadataHook } = vi.hoisted(() => ({
+  parseMetadata: vi.fn(),
+  metadataHook: vi.fn()
 }))
 
-vi.mock('@renderer/components/Icons/FallbackFavicon', () => ({
-  __esModule: true,
-  default: mocks.Favicon
-}))
-
+vi.unmock('@cherrystudio/ui')
 vi.mock('@renderer/hooks/useMetaDataParser', () => ({
-  useMetaDataParser: mocks.useMetaDataParser
+  useMetaDataParser: metadataHook
 }))
 
-vi.mock('@cherrystudio/ui', () => {
-  const React = require('react')
-  const PopoverContext = React.createContext({ open: false, onOpenChange: undefined })
-
-  return {
-    Popover: ({ children, open = false, onOpenChange, ...props }) =>
-      React.createElement(
-        PopoverContext.Provider,
-        { value: { open, onOpenChange } },
-        React.createElement('div', { ...props, 'data-testid': 'popover' }, children)
-      ),
-    PopoverTrigger: ({ children, asChild, ...props }) => {
-      if (asChild && React.isValidElement(children)) {
-        return React.cloneElement(children, { ...props, 'data-testid': 'popover-trigger' })
-      }
-      return React.createElement('div', { ...props, 'data-testid': 'popover-trigger' }, children)
-    },
-    PopoverContent: ({ children, sideOffset, ...props }) => {
-      void sideOffset
-      const context = React.use(PopoverContext)
-      return context.open ? React.createElement('div', { ...props, 'data-testid': 'popover-content' }, children) : null
-    }
-  }
-})
-
-vi.mock('@cherrystudio/ui', () => {
-  const React = require('react')
-  const PopoverContext = React.createContext({ open: false, onOpenChange: undefined })
-
-  return {
-    Popover: ({ children, open = false, onOpenChange, ...props }) =>
-      React.createElement(
-        PopoverContext.Provider,
-        { value: { open, onOpenChange } },
-        React.createElement('div', { ...props, 'data-testid': 'popover' }, children)
-      ),
-    PopoverTrigger: ({ children, asChild, ...props }) => {
-      if (asChild && React.isValidElement(children)) {
-        return React.cloneElement(children, { ...props, 'data-testid': 'popover-trigger' })
-      }
-      return React.createElement('div', { ...props, 'data-testid': 'popover-trigger' }, children)
-    },
-    PopoverContent: ({ children, sideOffset, ...props }) => {
-      void sideOffset
-      const context = React.use(PopoverContext)
-      return context.open ? React.createElement('div', { ...props, 'data-testid': 'popover-content' }, children) : null
-    }
-  }
-})
-
-// Mock the OgCard component
-vi.mock('@renderer/components/OgCard', () => ({
-  OgCard: ({ link }: { link: string; show: boolean }) => {
-    let hostname = ''
-    try {
-      hostname = new URL(link).hostname
-    } catch (e) {
-      // Ignore invalid URLs
-    }
-
-    return (
-      <div data-testid="og-card">
-        {hostname && <mocks.Favicon hostname={hostname} alt={link} />}
-        <div data-testid="title">{hostname}</div>
-        <div data-testid="text">{link}</div>
-      </div>
-    )
-  }
-}))
-
-describe('Hyperlink', () => {
+describe('Hyperlink context menu', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
     vi.clearAllMocks()
-    vi.useRealTimers()
+    metadataHook.mockReturnValue({ metadata: { title: 'Website preview' }, isLoading: false, parseMetadata })
   })
+  afterEach(() => vi.useRealTimers())
 
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('should match snapshot for normal url', () => {
-    const { container } = render(
-      <Hyperlink href="https://example.com/path%20with%20space">
-        <span>Child</span>
-      </Hyperlink>
-    )
-    expect(container).toMatchSnapshot()
-  })
-
-  it('should return children directly when href is empty', () => {
+  it('renders empty-href content without a preview', async () => {
     render(
       <Hyperlink href="">
-        <span>Only Child</span>
+        <span>Content</span>
       </Hyperlink>
     )
-    expect(screen.queryByTestId('popover')).toBeNull()
-    expect(screen.getByText('Only Child')).toBeInTheDocument()
+    fireEvent.pointerEnter(screen.getByText('Content'), { pointerType: 'mouse' })
+    await act(() => vi.advanceTimersByTimeAsync(600))
+    expect(screen.getByText('Content')).toBeVisible()
+    expect(metadataHook).not.toHaveBeenCalled()
   })
 
-  it('should decode href and show favicon when hostname exists', () => {
+  it.each([
+    ['https://example.com/a%20b', 'https://example.com/a b'],
+    ['https://example.com/%broken', 'https://example.com/%broken']
+  ])(
+    'loads metadata only after hovering, preserving URL decoding and malformed escapes: %s',
+    async (href, expected) => {
+      metadataHook.mockReturnValue({ metadata: {}, isLoading: true, parseMetadata })
+      render(
+        <Hyperlink href={href}>
+          <a href={href}>Website</a>
+        </Hyperlink>
+      )
+      expect(parseMetadata).not.toHaveBeenCalled()
+      fireEvent.pointerEnter(screen.getByRole('link'), { pointerType: 'mouse' })
+      await act(() => vi.advanceTimersByTimeAsync(499))
+      expect(parseMetadata).not.toHaveBeenCalled()
+      await act(() => vi.advanceTimersByTimeAsync(1))
+      expect(metadataHook).toHaveBeenCalledWith(expected, expect.any(Array))
+      expect(parseMetadata).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('restores keyboard preview after tabbing away without reopening on menu focus restoration', async () => {
+    vi.useRealTimers()
+    const user = userEvent.setup()
     render(
-      <Hyperlink href="https://domain.com/a%20b">
-        <span>child</span>
-      </Hyperlink>
+      <>
+        <Hyperlink href="https://example.com">
+          <a href="https://example.com">Website</a>
+        </Hyperlink>
+        <button type="button">Next</button>
+      </>
     )
-
-    // Popover wrapper exists
-    const popover = screen.getByTestId('popover')
-    expect(popover).toBeInTheDocument()
-    fireEvent.mouseEnter(screen.getByTestId('popover-trigger'))
-    expect(screen.getByTestId('popover-content')).toHaveClass('w-auto max-w-none overflow-hidden rounded-lg p-0')
-
-    // Content includes decoded url text and favicon with hostname
-    expect(screen.getByTestId('favicon')).toHaveAttribute('data-hostname', 'domain.com')
-    expect(screen.getByTestId('favicon')).toHaveAttribute('alt', 'https://domain.com/a b')
-    // The title should show hostname and text should show the full URL
-    expect(screen.getByTestId('title')).toHaveTextContent('domain.com')
-    expect(screen.getByTestId('text')).toHaveTextContent('https://domain.com/a b')
+    const link = screen.getByRole('link', { name: 'Website' })
+    await user.tab()
+    await waitFor(() => expect(screen.getByText('Website preview')).toBeVisible())
+    fireEvent.contextMenu(link)
+    // Model the menu taking focus and returning it on Escape.
+    act(() => link.blur())
+    act(() => link.focus())
+    await act(() => new Promise((resolve) => setTimeout(resolve, 600)))
+    expect(screen.queryByText('Website preview')).not.toBeInTheDocument()
+    await user.tab()
+    expect(screen.getByRole('button', { name: 'Next' })).toHaveFocus()
+    await user.tab({ shift: true })
+    expect(link).toHaveFocus()
+    await waitFor(() => expect(screen.getByText('Website preview')).toBeVisible())
   })
 
-  it('should not render favicon when URL parsing fails (invalid url)', () => {
+  it.each([100, 600])('suppresses pending and visible previews after right-click at %i ms', async (delay) => {
+    const contextMenu = vi.fn()
     render(
-      <Hyperlink href="not%2Furl">
-        <span>child</span>
-      </Hyperlink>
+      <div onContextMenu={contextMenu}>
+        <Hyperlink href="https://example.com">
+          <a href="https://example.com">Website</a>
+        </Hyperlink>
+      </div>
     )
+    const link = screen.getByRole('link', { name: 'Website' })
+    fireEvent.pointerEnter(link, { pointerType: 'mouse' })
+    await act(() => vi.advanceTimersByTimeAsync(delay))
+    if (delay > 500) expect(screen.getByText('Website preview')).toBeVisible()
+    fireEvent(link, new MouseEvent('pointerdown', { button: 2, bubbles: true }))
+    expect(screen.queryByText('Website preview')).not.toBeInTheDocument()
+    await act(() => vi.advanceTimersByTimeAsync(1000))
+    expect(screen.queryByText('Website preview')).not.toBeInTheDocument()
+    fireEvent.contextMenu(link)
+    await act(() => vi.advanceTimersByTimeAsync(1000))
+    expect(screen.queryByText('Website preview')).not.toBeInTheDocument()
+    expect(contextMenu).toHaveBeenCalledOnce()
 
-    fireEvent.mouseEnter(screen.getByTestId('popover-trigger'))
+    fireEvent.focus(link)
+    await act(() => vi.advanceTimersByTimeAsync(600))
+    expect(screen.queryByText('Website preview')).not.toBeInTheDocument()
 
-    // decodeURIComponent succeeds => "not/url" is displayed
-    expect(screen.queryByTestId('favicon')).toBeNull()
-    // Since there's no hostname and no og:title, title shows empty, but text shows the URL
-    expect(screen.getByTestId('title')).toBeEmptyDOMElement()
-    expect(screen.getByTestId('text')).toHaveTextContent('not/url')
-  })
-
-  it('should not render favicon for non-http(s) scheme without hostname (mailto:)', () => {
-    render(
-      <Hyperlink href="mailto:test%40example.com">
-        <span>child</span>
-      </Hyperlink>
-    )
-
-    fireEvent.mouseEnter(screen.getByTestId('popover-trigger'))
-
-    // Decoded to mailto:test@example.com, hostname is empty => no favicon
-    expect(screen.queryByTestId('favicon')).toBeNull()
-    // Since there's no hostname and no og:title, title shows empty, but text shows the decoded URL
-    expect(screen.getByTestId('title')).toBeEmptyDOMElement()
-    expect(screen.getByTestId('text')).toHaveTextContent('mailto:test@example.com')
-  })
-
-  it('should open the popover when hovering the link trigger', () => {
-    render(
-      <Hyperlink href="https://domain.com/a%20b">
-        <span>child</span>
-      </Hyperlink>
-    )
-
-    expect(screen.queryByTestId('popover-content')).toBeNull()
-
-    fireEvent.mouseEnter(screen.getByTestId('popover-trigger'))
-
-    expect(screen.getByTestId('popover-content')).toBeInTheDocument()
-  })
-
-  it('should stay open when moving from the trigger to the popover content and close after leaving content', () => {
-    vi.useFakeTimers()
-
-    render(
-      <Hyperlink href="https://domain.com/a%20b">
-        <span>child</span>
-      </Hyperlink>
-    )
-
-    fireEvent.mouseEnter(screen.getByTestId('popover-trigger'))
-    const content = screen.getByTestId('popover-content')
-
-    fireEvent.mouseLeave(screen.getByTestId('popover-trigger'))
-    fireEvent.mouseEnter(content)
-
-    act(() => {
-      vi.advanceTimersByTime(120)
-    })
-
-    expect(screen.getByTestId('popover-content')).toBeInTheDocument()
-
-    fireEvent.mouseLeave(screen.getByTestId('popover-content'))
-
-    act(() => {
-      vi.advanceTimersByTime(120)
-    })
-
-    expect(screen.queryByTestId('popover-content')).toBeNull()
+    fireEvent.pointerLeave(link, { pointerType: 'mouse' })
+    fireEvent.pointerEnter(link, { pointerType: 'mouse' })
+    await act(() => vi.advanceTimersByTimeAsync(600))
+    expect(screen.getByText('Website preview')).toBeVisible()
   })
 })

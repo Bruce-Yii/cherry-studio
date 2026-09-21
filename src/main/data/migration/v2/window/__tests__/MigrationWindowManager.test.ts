@@ -1,6 +1,8 @@
-import { MigrationIpcChannels, type MigrationStage } from '@shared/data/migration/v2/types'
 import { app, BrowserWindow } from 'electron'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { application } from '@application'
+import { MigrationIpcChannels, type MigrationStage } from '@shared/data/migration/v2/types'
 
 import { MigrationWindowManager } from '../MigrationWindowManager'
 
@@ -43,15 +45,18 @@ function makeFakeWindow() {
 describe('MigrationWindowManager', () => {
   let manager: MigrationWindowManager
   let fakeWindow: FakeWindow
-  let quitMock: ReturnType<typeof vi.fn>
+  let quitMock: ReturnType<typeof vi.fn<(...args: any[]) => any>>
 
   beforeEach(() => {
     vi.clearAllMocks()
     fakeWindow = makeFakeWindow()
-    vi.mocked(BrowserWindow).mockImplementation(() => fakeWindow as unknown as BrowserWindow)
+    vi.mocked(BrowserWindow).mockImplementation(function BrowserWindowMock() {
+      return fakeWindow as unknown as BrowserWindow
+    })
     // The global electron mock's `app` has no `quit`; provide one to observe quit attempts.
     quitMock = vi.fn()
     ;(app as unknown as { quit: typeof quitMock }).quit = quitMock
+    ;(app as unknown as { isPackaged: boolean }).isPackaged = false
     manager = new MigrationWindowManager()
     manager.create()
   })
@@ -75,8 +80,8 @@ describe('MigrationWindowManager', () => {
     }
   )
 
-  // In-flow stages: close is intercepted so the renderer can confirm before quitting.
-  it.each<MigrationStage>(['backup_required', 'backup_progress', 'backup_confirmed', 'migration'])(
+  // In-flow stage: close is intercepted so the renderer can confirm before quitting.
+  it.each<MigrationStage>(['migration'])(
     'intercepts a close during the %s stage and asks the renderer to confirm',
     (stage) => {
       manager.setStage(stage)
@@ -90,11 +95,23 @@ describe('MigrationWindowManager', () => {
   )
 
   it('closes the window and quits once the renderer confirms quit', () => {
-    manager.setStage('backup_progress')
+    manager.setStage('migration')
     manager.confirmQuit()
 
     expect(fakeWindow.close).toHaveBeenCalledTimes(1)
     expect(quitMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('routes packaged restarts through the application relaunch policy', async () => {
+    const electronRelaunch = vi.fn()
+    const electronExit = vi.fn()
+    Object.assign(app, { isPackaged: true, relaunch: electronRelaunch, exit: electronExit })
+
+    await manager.restartApp()
+
+    expect(application.relaunch).toHaveBeenCalledOnce()
+    expect(electronRelaunch).not.toHaveBeenCalled()
+    expect(electronExit).not.toHaveBeenCalled()
   })
 
   // Regression: confirmQuit() during an in-flow stage must NOT re-trigger the in-flow
@@ -156,7 +173,7 @@ describe('MigrationWindowManager', () => {
 
     it('re-prompts instead of force-quitting after the renderer acks a dismissal', () => {
       const requester = wireRequester()
-      manager.setStage('backup_confirmed')
+      manager.setStage('migration')
 
       fakeWindow.emit('close', { preventDefault: vi.fn() }) // pending = true
       manager.clearCloseConfirm() // renderer dismissed the dialog (CancelClose)
@@ -195,7 +212,7 @@ describe('MigrationWindowManager', () => {
       fakeWindow.emit('close', { preventDefault: vi.fn() }) // pending = true
 
       manager.setStage('error') // leaves the in-flow set → clears pending
-      manager.setStage('backup_confirmed') // retry re-enters an in-flow stage
+      manager.setStage('migration') // re-enters the in-flow migration stage
       fakeWindow.webContents.send.mockClear()
 
       const event = { preventDefault: vi.fn() }

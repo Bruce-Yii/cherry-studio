@@ -1,17 +1,28 @@
-import type { KnowledgeBase } from '@shared/data/types/knowledge'
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { KnowledgeBase } from '@shared/data/types/knowledge'
 
 import { useKnowledgeRagConfig } from '../useKnowledgeRagConfig'
 
 const mockUseMutation = vi.fn()
 const mockTrigger = vi.fn()
+const mockUsePreference = vi.fn()
+const mockUseAvailableFileProcessors = vi.hoisted(() => vi.fn())
 const mockLogger = vi.hoisted(() => ({
   error: vi.fn()
 }))
 
 vi.mock('@data/hooks/useDataApi', () => ({
   useMutation: (...args: unknown[]) => mockUseMutation(...args)
+}))
+
+vi.mock('@data/hooks/usePreference', () => ({
+  usePreference: (...args: unknown[]) => mockUsePreference(...args)
+}))
+
+vi.mock('@renderer/hooks/useAvailableFileProcessors', () => ({
+  useAvailableFileProcessors: () => mockUseAvailableFileProcessors()
 }))
 
 vi.mock('@logger', () => ({
@@ -26,6 +37,7 @@ vi.mock('@renderer/i18n/label', () => ({
   getFileProcessorLabelKey: (id: string) =>
     (
       ({
+        'local-document': 'Local Document',
         paddleocr: 'PaddleOCR',
         mineru: 'MinerU',
         doc2x: 'Doc2X',
@@ -37,14 +49,7 @@ vi.mock('@renderer/i18n/label', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) =>
-      (
-        ({
-          'knowledge.rag.search_mode.hybrid': '混合检索（推荐）',
-          'knowledge.rag.search_mode.vector': '向量检索',
-          'knowledge.rag.search_mode.bm25': '全文检索'
-        }) as Record<string, string>
-      )[key] ?? key
+    t: (key: string) => key
   })
 }))
 
@@ -60,11 +65,10 @@ const createKnowledgeBase = (overrides: Partial<KnowledgeBase> = {}): KnowledgeB
   chunkOverlap: 200,
   chunkStrategy: 'structured',
   chunkSeparator: '\\n\\n',
-  threshold: 0,
+  threshold: 0.2,
   documentCount: 6,
   status: 'completed',
   error: null,
-  searchMode: 'hybrid',
   createdAt: '2026-04-15T09:00:00+08:00',
   updatedAt: '2026-04-15T09:00:00+08:00',
   ...overrides
@@ -78,30 +82,47 @@ describe('useKnowledgeRagConfig', () => {
       isLoading: false,
       error: undefined
     })
+    mockUsePreference.mockReturnValue([
+      {
+        paddleocr: {
+          apiKeys: ['paddle-key']
+        },
+        mineru: {
+          apiKeys: []
+        },
+        mistral: {
+          apiKeys: ['   ']
+        }
+      }
+    ])
+    mockUseAvailableFileProcessors.mockReturnValue({
+      processorIds: new Set(['paddleocr', 'local-document', 'mineru', 'doc2x', 'mistral', 'open-mineru']),
+      status: 'ready'
+    })
   })
 
-  it('builds options from shared data and translations and exposes the save mutation', async () => {
+  it('marks unconfigured document processors as unavailable and exposes the save mutation', async () => {
     const base = createKnowledgeBase({
-      fileProcessorId: 'doc2x',
+      fileProcessorId: 'paddleocr',
       rerankModelId: 'jina::jina-reranker-v2-base-multilingual'
     })
     const { result } = renderHook(() => useKnowledgeRagConfig(base))
 
+    // `statusLabel` is what the row shows on the right; it must track `disabled`
+    // so an unconfigured processor says why rather than looking merely greyed out.
     expect(result.current.fileProcessorOptions).toEqual([
-      { value: 'paddleocr', label: 'PaddleOCR' },
-      { value: 'mineru', label: 'MinerU' },
-      { value: 'doc2x', label: 'Doc2X' },
-      { value: 'mistral', label: 'Mistral' },
-      { value: 'open-mineru', label: 'Open MinerU' }
+      {
+        value: 'local-document',
+        label: 'Local Document',
+        disabled: false,
+        statusLabel: undefined
+      },
+      { value: 'paddleocr', label: 'PaddleOCR', disabled: false, statusLabel: undefined },
+      { value: 'mineru', label: 'MinerU', disabled: true, statusLabel: 'knowledge.rag.processor_not_configured' },
+      { value: 'doc2x', label: 'Doc2X', disabled: true, statusLabel: 'knowledge.rag.processor_not_configured' },
+      { value: 'mistral', label: 'Mistral', disabled: true, statusLabel: 'knowledge.rag.processor_not_configured' },
+      { value: 'open-mineru', label: 'Open MinerU', disabled: false, statusLabel: undefined }
     ])
-    expect(result.current.searchModeOptions).toEqual([
-      { value: 'hybrid', label: '混合检索（推荐）' },
-      { value: 'vector', label: '向量检索' },
-      { value: 'bm25', label: '全文检索' }
-    ])
-    expect(result.current.fileProcessorOptions.map((option) => option.value)).not.toContain('tesseract')
-    expect(result.current.fileProcessorOptions.map((option) => option.value)).not.toContain('system')
-    expect(result.current.fileProcessorOptions.map((option) => option.value)).not.toContain('ovocr')
     expect(mockUseMutation).toHaveBeenCalledWith('PATCH', '/knowledge-bases/:id', {
       refresh: ['/knowledge-bases']
     })
@@ -116,9 +137,7 @@ describe('useKnowledgeRagConfig', () => {
         embeddingModelId: 'voyage::voyage-3-large',
         rerankModelId: null,
         documentCount: 10,
-        threshold: 0.25,
-        searchMode: 'vector',
-        hybridAlpha: null
+        threshold: 0.4
       })
     })
 
@@ -130,8 +149,81 @@ describe('useKnowledgeRagConfig', () => {
         chunkOverlap: 256,
         rerankModelId: null,
         documentCount: 10,
-        threshold: 0.25,
-        searchMode: 'vector'
+        threshold: 0.4
+      }
+    })
+  })
+
+  it('includes Open MinerU without an API key because authentication is optional', () => {
+    mockUsePreference.mockReturnValue([
+      {
+        'open-mineru': {
+          capabilities: {
+            document_to_markdown: {
+              apiHost: 'http://127.0.0.1:8000'
+            }
+          }
+        }
+      }
+    ])
+
+    const { result } = renderHook(() => useKnowledgeRagConfig(createKnowledgeBase()))
+
+    expect(result.current.fileProcessorOptions.find((option) => option.value === 'open-mineru')).toEqual({
+      value: 'open-mineru',
+      label: 'Open MinerU',
+      disabled: false
+    })
+  })
+
+  it('offers only processors reported as supported by main', () => {
+    mockUseAvailableFileProcessors.mockReturnValue({
+      processorIds: new Set(['paddleocr', 'mineru']),
+      status: 'ready'
+    })
+
+    const { result } = renderHook(() =>
+      useKnowledgeRagConfig(createKnowledgeBase({ fileProcessorId: 'local-document' }))
+    )
+
+    expect(result.current.fileProcessorOptions.map((option) => option.value)).toEqual(['paddleocr', 'mineru'])
+  })
+
+  it.each(['loading', 'error'] as const)(
+    'keeps only the persisted processor visible and disabled when support is %s',
+    (status) => {
+      mockUseAvailableFileProcessors.mockReturnValue({ processorIds: new Set(), status })
+
+      const { result } = renderHook(() =>
+        useKnowledgeRagConfig(createKnowledgeBase({ fileProcessorId: 'local-document' }))
+      )
+
+      expect(result.current.fileProcessorOptions).toEqual([
+        {
+          value: 'local-document',
+          label: 'Local Document',
+          disabled: true,
+          statusLabel: undefined
+        }
+      ])
+    }
+  )
+
+  it('includes an explicit embedding model override in the patch body', async () => {
+    const { result } = renderHook(() => useKnowledgeRagConfig(createKnowledgeBase()))
+
+    await act(async () => {
+      await result.current.save(result.current.initialValues, {
+        embeddingModelId: 'voyage::voyage-3-large',
+        dimensions: 2048
+      })
+    })
+
+    expect(mockTrigger).toHaveBeenCalledWith({
+      params: { id: 'base-1' },
+      body: {
+        embeddingModelId: 'voyage::voyage-3-large',
+        dimensions: 2048
       }
     })
   })
@@ -145,24 +237,6 @@ describe('useKnowledgeRagConfig', () => {
     expect(mockLogger.error).toHaveBeenCalledWith('Failed to update knowledge RAG config', saveError, {
       baseId: 'base-1',
       updates: {}
-    })
-  })
-
-  it('builds a patch with only the changed search mode', async () => {
-    const { result } = renderHook(() => useKnowledgeRagConfig(createKnowledgeBase()))
-
-    await act(async () => {
-      await result.current.save({
-        ...result.current.initialValues,
-        searchMode: 'vector'
-      })
-    })
-
-    expect(mockTrigger).toHaveBeenCalledWith({
-      params: { id: 'base-1' },
-      body: {
-        searchMode: 'vector'
-      }
     })
   })
 })

@@ -1,5 +1,7 @@
-import { application } from '@application'
+import { shell } from 'electron'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { application } from '@application'
 
 import { BaseService } from '../../lifecycle/BaseService'
 import { type Disposable } from '../../lifecycle/event'
@@ -33,42 +35,43 @@ vi.mock('@main/core/platform', () => ({
 interface MockBrowserWindow {
   id: number
   constructorOptions?: Record<string, unknown>
-  show: ReturnType<typeof vi.fn>
-  hide: ReturnType<typeof vi.fn>
-  focus: ReturnType<typeof vi.fn>
-  close: ReturnType<typeof vi.fn>
-  destroy: ReturnType<typeof vi.fn>
-  minimize: ReturnType<typeof vi.fn>
-  maximize: ReturnType<typeof vi.fn>
-  unmaximize: ReturnType<typeof vi.fn>
-  restore: ReturnType<typeof vi.fn>
-  isDestroyed: ReturnType<typeof vi.fn>
-  isMaximized: ReturnType<typeof vi.fn>
-  isMinimized: ReturnType<typeof vi.fn>
-  isFullScreen: ReturnType<typeof vi.fn>
-  isVisible: ReturnType<typeof vi.fn>
-  isFocused: ReturnType<typeof vi.fn>
-  getNormalBounds: ReturnType<typeof vi.fn>
-  getBounds: ReturnType<typeof vi.fn>
-  setFullScreen: ReturnType<typeof vi.fn>
-  setBounds: ReturnType<typeof vi.fn>
-  setContentBounds: ReturnType<typeof vi.fn>
-  setPosition: ReturnType<typeof vi.fn>
-  center: ReturnType<typeof vi.fn>
-  getTitle: ReturnType<typeof vi.fn>
-  setTitleBarOverlay: ReturnType<typeof vi.fn>
-  loadURL: ReturnType<typeof vi.fn>
-  loadFile: ReturnType<typeof vi.fn>
-  once: ReturnType<typeof vi.fn>
-  on: ReturnType<typeof vi.fn>
-  emit: ReturnType<typeof vi.fn>
-  removeAllListeners: ReturnType<typeof vi.fn>
+  show: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  hide: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  focus: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  close: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  destroy: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  minimize: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  maximize: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  unmaximize: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  restore: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  isDestroyed: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  isMaximized: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  isMinimized: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  isFullScreen: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  isVisible: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  isFocused: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  getNormalBounds: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  getBounds: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  setFullScreen: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  setBounds: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  setContentBounds: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  setPosition: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  center: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  getTitle: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  setTitleBarOverlay: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  loadURL: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  loadFile: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  once: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  on: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  emit: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+  removeAllListeners: ReturnType<typeof vi.fn<(...args: any[]) => any>>
   webContents: {
-    send: ReturnType<typeof vi.fn>
-    isCrashed: ReturnType<typeof vi.fn>
-    setWindowOpenHandler: ReturnType<typeof vi.fn>
-    on: ReturnType<typeof vi.fn>
-    getURL: ReturnType<typeof vi.fn>
+    send: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+    isCrashed: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+    setWindowOpenHandler: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+    on: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+    getURL: ReturnType<typeof vi.fn<(...args: any[]) => any>>
+    mainFrame: { frameTreeNodeId: number }
   }
 }
 
@@ -135,7 +138,8 @@ function createMockBrowserWindow(): MockBrowserWindow {
       isCrashed: vi.fn(() => false),
       setWindowOpenHandler: vi.fn(),
       on: vi.fn(),
-      getURL: vi.fn(() => '')
+      getURL: vi.fn(() => ''),
+      mainFrame: { frameTreeNodeId: 1 }
     }
   }
   return win
@@ -149,7 +153,7 @@ vi.mock('electron', () => {
       const win = createMockBrowserWindow()
       win.constructorOptions = opts
       createdWindows.push(win)
-      return win as never
+      return win
     }
 
     static fromWebContents(): null {
@@ -247,6 +251,15 @@ vi.mock('../windowRegistry', () => {
       type: 'default',
       lifecycle: 'default',
       htmlPath: 'windows/default/index.html',
+      windowOptions: {}
+    },
+    // Consumer-loaded: empty htmlPath → WM skips loadWindowContent; the domain
+    // service loads content itself after open() (see "content loading" tests).
+    consumerLoaded: {
+      type: 'consumerLoaded',
+      lifecycle: 'default',
+      showMode: 'manual',
+      htmlPath: '',
       windowOptions: {}
     },
     singleton: {
@@ -400,6 +413,161 @@ describe('WindowManager', () => {
       wm.close(id)
 
       expect(win.destroy).toHaveBeenCalled()
+    })
+  })
+
+  // ─── Content loading (htmlPath contract) ───────────────
+
+  describe('content loading (htmlPath)', () => {
+    it('loads the registry htmlPath on create (production path → loadFile)', () => {
+      const id = wm.open('default' as never)
+      const win = wm.getWindow(id) as unknown as MockBrowserWindow
+
+      expect(win.loadFile).toHaveBeenCalledTimes(1)
+    })
+
+    it('skips content loading when htmlPath is empty (consumer-loaded window)', () => {
+      const id = wm.open('consumerLoaded' as never)
+      const win = wm.getWindow(id) as unknown as MockBrowserWindow
+
+      // Empty htmlPath = domain service owns loading; WM must not loadFile/loadURL.
+      expect(win).toBeDefined()
+      expect(win.loadFile).not.toHaveBeenCalled()
+      expect(win.loadURL).not.toHaveBeenCalled()
+    })
+  })
+
+  // ─── will-navigate guard (S13) ──────────────────────────
+
+  describe('will-navigate guard', () => {
+    beforeEach(() => {
+      vi.mocked(shell.openExternal).mockClear()
+    })
+
+    /** The guard WindowManager registers via webContents.on('will-navigate', …). */
+    function getWillNavigateHandler(
+      win: MockBrowserWindow
+    ): (event: { preventDefault: () => void }, url: string) => void {
+      const call = win.webContents.on.mock.calls.find(([event]) => event === 'will-navigate')
+      if (!call) throw new Error('will-navigate handler was not registered')
+      return call[1] as never
+    }
+
+    it('blocks navigation to non-http(s) URLs instead of letting it pass', () => {
+      const id = wm.open('default' as never)
+      const win = wm.getWindow(id) as unknown as MockBrowserWindow
+      const handler = getWillNavigateHandler(win)
+
+      for (const url of ['file:///etc/passwd', 'cherry://settings', 'about:blank']) {
+        const preventDefault = vi.fn()
+        handler({ preventDefault }, url)
+        expect(preventDefault, `expected navigation to ${url} to be blocked`).toHaveBeenCalledTimes(1)
+      }
+      expect(shell.openExternal).not.toHaveBeenCalled()
+    })
+
+    it('allows same-origin http(s) navigation unchanged', () => {
+      const id = wm.open('default' as never)
+      const win = wm.getWindow(id) as unknown as MockBrowserWindow
+      win.webContents.getURL.mockReturnValue('https://app.local/index.html')
+      const handler = getWillNavigateHandler(win)
+
+      const preventDefault = vi.fn()
+      handler({ preventDefault }, 'https://app.local/other.html')
+
+      expect(preventDefault).not.toHaveBeenCalled()
+      expect(shell.openExternal).not.toHaveBeenCalled()
+    })
+
+    it('blocks cross-origin http(s) without owning external navigation policy', () => {
+      const id = wm.open('default' as never)
+      const win = wm.getWindow(id) as unknown as MockBrowserWindow
+      win.webContents.getURL.mockReturnValue('https://app.local/index.html')
+      const handler = getWillNavigateHandler(win)
+
+      const preventDefault = vi.fn()
+      handler({ preventDefault }, 'https://evil.example.com')
+
+      expect(preventDefault).toHaveBeenCalledTimes(1)
+      expect(shell.openExternal).not.toHaveBeenCalled()
+    })
+  })
+
+  // ─── will-frame-navigate subframe guard ────────────────
+
+  describe('will-frame-navigate subframe guard', () => {
+    /** The guard WindowManager registers via webContents.on('will-frame-navigate', …). */
+    function getWillFrameNavigateHandler(
+      win: MockBrowserWindow
+    ): (event: {
+      preventDefault: () => void
+      url: string
+      isMainFrame: boolean
+      initiator?: { frameTreeNodeId?: number } | null
+    }) => void {
+      const call = win.webContents.on.mock.calls.find(([event]) => event === 'will-frame-navigate')
+      if (!call) throw new Error('will-frame-navigate handler was not registered')
+      return call[1] as never
+    }
+
+    it('blocks subframe navigation initiated from inside a frame (link click)', () => {
+      const id = wm.open('default' as never)
+      const win = wm.getWindow(id) as unknown as MockBrowserWindow
+      const handler = getWillFrameNavigateHandler(win)
+
+      const preventDefault = vi.fn()
+      handler({
+        preventDefault,
+        url: 'https://evil.example.com/?exfil',
+        isMainFrame: false,
+        initiator: { frameTreeNodeId: 42 }
+      })
+
+      expect(preventDefault).toHaveBeenCalledTimes(1)
+    })
+
+    it('blocks subframe navigation with no initiator identity (fail-closed)', () => {
+      const id = wm.open('default' as never)
+      const win = wm.getWindow(id) as unknown as MockBrowserWindow
+      const handler = getWillFrameNavigateHandler(win)
+
+      for (const initiator of [null, undefined, {}]) {
+        const preventDefault = vi.fn()
+        handler({ preventDefault, url: 'https://evil.example.com', isMainFrame: false, initiator })
+        expect(
+          preventDefault,
+          `expected navigation with initiator ${JSON.stringify(initiator)} to be blocked`
+        ).toHaveBeenCalledTimes(1)
+      }
+    })
+
+    it('allows subframe loads the app main frame itself initiated (iframe src/srcdoc)', () => {
+      const id = wm.open('default' as never)
+      const win = wm.getWindow(id) as unknown as MockBrowserWindow
+      const handler = getWillFrameNavigateHandler(win)
+
+      // A distinct wrapper instance with the main frame's id: Electron does not
+      // guarantee stable WebFrameMain object identity, only stable frameTreeNodeId.
+      const preventDefault = vi.fn()
+      handler({
+        preventDefault,
+        url: 'file:///resources/privacy-policy.html',
+        isMainFrame: false,
+        initiator: { frameTreeNodeId: win.webContents.mainFrame.frameTreeNodeId }
+      })
+
+      expect(preventDefault).not.toHaveBeenCalled()
+    })
+
+    it('leaves main-frame navigation to the will-navigate guard', () => {
+      const id = wm.open('default' as never)
+      const win = wm.getWindow(id) as unknown as MockBrowserWindow
+      const handler = getWillFrameNavigateHandler(win)
+
+      const preventDefault = vi.fn()
+      handler({ preventDefault, url: 'https://evil.example.com', isMainFrame: true, initiator: null })
+
+      expect(preventDefault).not.toHaveBeenCalled()
     })
   })
 
@@ -844,6 +1012,26 @@ describe('WindowManager', () => {
         // close during suspension destroys (not pool)
         wm.close(id)
         expect(win.destroy).toHaveBeenCalled()
+      })
+
+      it('skips eager warmup on boot for a pool suspended beforehand', async () => {
+        // Feature-gated pools (screenshot overlays) suspend themselves during their
+        // owner's onInit when the feature is off. Warming them anyway at onAllReady
+        // would hold a hidden window — and its renderer's memory — for the whole run,
+        // for a feature the user has switched off.
+        wm.suspendPool('eagerPooled' as never)
+
+        await wm._doAllReady()
+
+        expect(wm.getWindowsByType('eagerPooled' as never)).toHaveLength(0)
+      })
+
+      it('eagerly warms a pool that was never suspended', async () => {
+        // Negative control: without this, the assertion above would also pass if
+        // eager warmup had simply stopped working.
+        await wm._doAllReady()
+
+        expect(wm.getWindowsByType('eagerPooled' as never)).toHaveLength(1)
       })
 
       it('resumePool() clears suspended flag', () => {
@@ -1403,6 +1591,12 @@ describe('WindowManager', () => {
       expect(info?.createdAt).toBeGreaterThan(0)
     })
 
+    it('getWindowType() returns the window type by id, undefined for an unknown id', () => {
+      const id = wm.open('singleton' as never)
+      expect(wm.getWindowType(id)).toBe('singleton')
+      expect(wm.getWindowType('no-such-window')).toBeUndefined()
+    })
+
     it('getWindowInfosByType() returns serializable info filtered by type', () => {
       wm.open('default' as never)
       wm.open('default' as never)
@@ -1442,6 +1636,13 @@ describe('WindowManager', () => {
 
     it('returns null for missing init data', () => {
       const id = wm.open('default' as never)
+      expect(wm.getInitData(id)).toBeNull()
+    })
+
+    it('clears init data', () => {
+      const id = wm.open('default' as never)
+      wm.setInitData(id, { key: 'value' })
+      wm.clearInitData(id)
       expect(wm.getInitData(id)).toBeNull()
     })
 
@@ -1568,6 +1769,17 @@ describe('WindowManager', () => {
       wm.broadcast('test-channel')
 
       expect(createdWindows[0].webContents.send).not.toHaveBeenCalled()
+    })
+
+    it('isolates a failing send so remaining windows still receive', () => {
+      wm.open('default' as never)
+      wm.open('singleton' as never)
+      createdWindows[0].webContents.send.mockImplementationOnce(() => {
+        throw new Error('renderer gone')
+      })
+
+      expect(() => wm.broadcast('test-channel', 'data')).not.toThrow()
+      expect(createdWindows[1].webContents.send).toHaveBeenCalledWith('test-channel', 'data')
     })
   })
 

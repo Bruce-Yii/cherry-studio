@@ -10,76 +10,93 @@
  */
 
 import { topicService } from '@data/services/TopicService'
-import type { HandlersFor } from '@shared/data/api/apiTypes'
 import { OrderBatchRequestSchema, OrderRequestSchema } from '@shared/data/api/schemas/_endpointHelpers'
 import {
   CreateTopicSchema,
-  DeleteTopicsQuerySchema,
+  DeleteTopicQuerySchema,
   DuplicateTopicSchema,
+  LatestTopicQuerySchema,
   ListTopicsQuerySchema,
+  MoveTopicSchema,
+  ReuseOrCreateTopicSchema,
   SetActiveNodeSchema,
   type TopicSchemas,
   UpdateTopicSchema
 } from '@shared/data/api/schemas/topics'
+import type { HandlersFor } from '@shared/data/api/types'
 
 export const topicHandlers: HandlersFor<TopicSchemas> = {
   '/topics': {
     GET: async ({ query }) => {
       const parsed = ListTopicsQuerySchema.parse(query ?? {})
-      return await topicService.listByCursor(parsed)
+      return topicService.listByCursor(parsed)
     },
 
     POST: async ({ body }) => {
       const parsed = CreateTopicSchema.parse(body)
-      return await topicService.create(parsed)
-    },
+      return topicService.create(parsed)
+    }
+  },
 
-    DELETE: async ({ query }) => {
-      const parsed = DeleteTopicsQuerySchema.parse(query)
-      return await topicService.deleteByIds(parsed.ids)
+  '/topics/latest': {
+    GET: async ({ query }) => {
+      const parsed = LatestTopicQuerySchema.parse(query ?? {})
+      return { topic: topicService.getLatestActive(parsed) }
+    }
+  },
+
+  '/topics/reusable-placeholder': {
+    POST: async ({ body }) => {
+      const parsed = ReuseOrCreateTopicSchema.parse(body)
+      return topicService.reuseOrCreatePlaceholder(parsed)
     }
   },
 
   '/topics/:id': {
     GET: async ({ params }) => {
-      return await topicService.getById(params.id)
+      return topicService.getById(params.id)
     },
 
     PATCH: async ({ params, body }) => {
       const parsed = UpdateTopicSchema.parse(body)
-      return await topicService.update(params.id, parsed)
+      return topicService.update(params.id, parsed)
     },
 
-    DELETE: async ({ params }) => {
-      await topicService.delete(params.id)
+    DELETE: async ({ params, query }) => {
+      DeleteTopicQuerySchema.parse(query)
+      topicService.delete(params.id, { permanent: true })
       return undefined
+    }
+  },
+
+  '/topics/:id/restore': {
+    POST: async ({ params }) => topicService.restore(params.id)
+  },
+
+  '/topics/:id/move': {
+    POST: async ({ params, body }) => {
+      const parsed = MoveTopicSchema.parse(body)
+      return topicService.move(params.id, parsed)
     }
   },
 
   '/topics/:id/active-node': {
     PUT: async ({ params, body }) => {
       const parsed = SetActiveNodeSchema.parse(body)
-      return await topicService.setActiveNode(params.id, parsed.nodeId)
+      return topicService.setActiveNode(params.id, parsed.nodeId)
     }
   },
 
   '/topics/:id/duplicate': {
     POST: async ({ params, body }) => {
       const parsed = DuplicateTopicSchema.parse(body)
-      return await topicService.duplicate(params.id, parsed)
+      return topicService.duplicate(params.id, parsed)
     }
   },
-
-  '/assistants/:assistantId/topics': {
-    DELETE: async ({ params }) => {
-      return await topicService.deleteByAssistantId(params.assistantId)
-    }
-  },
-
   '/topics/:id/order': {
     PATCH: async ({ params, body }) => {
       const parsed = OrderRequestSchema.parse(body)
-      await topicService.reorder(params.id, parsed)
+      topicService.reorder(params.id, parsed)
       return undefined
     }
   },
@@ -87,7 +104,7 @@ export const topicHandlers: HandlersFor<TopicSchemas> = {
   '/topics/order:batch': {
     PATCH: async ({ body }) => {
       const parsed = OrderBatchRequestSchema.parse(body)
-      await topicService.reorderBatch(parsed.moves)
+      topicService.reorderBatch(parsed.moves)
       return undefined
     }
   }

@@ -53,7 +53,7 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
     type: WindowType.Main,
     lifecycle: 'singleton',
     htmlPath: 'windows/main/index.html',
-    // preload omitted → defaults to 'index.js' (full API preload).
+    // preload omitted → defaults to 'preload.js' (full API preload).
     showMode: 'manual',
     // Persist & restore position/size across launches (maximize re-applied by the service).
     rememberBounds: true,
@@ -101,33 +101,69 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
     }
   },
 
-  // Settings window — singleton popup surface for application settings.
-  // The renderer consumes initData as the target /settings/* route, so open()
-  // can focus an existing settings window and navigate it in-place.
-  [WindowType.Settings]: {
-    type: WindowType.Settings,
-    lifecycle: 'singleton',
-    singletonConfig: {
-      retentionTime: 300
-    },
-    htmlPath: 'windows/settings/index.html',
+  // Hidden one-shot print surface. PrintService owns loading generated paper HTML
+  // and closes the window after print / PDF export.
+  [WindowType.Print]: {
+    type: WindowType.Print,
+    lifecycle: 'default',
+    htmlPath: '',
+    preload: '',
+    showMode: 'manual',
     windowOptions: {
-      ...DEFAULT_WINDOW_CONFIG,
-      width: 960,
-      height: 680,
-      minWidth: 760,
-      minHeight: 560,
+      skipTaskbar: true,
       autoHideMenuBar: true,
-      transparent: false,
-      vibrancy: 'sidebar',
-      visualEffectState: 'active',
+      frame: false,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: false,
-        webSecurity: false,
-        webviewTag: true
+        sandbox: true,
+        webSecurity: false
       }
+    },
+    behavior: {
+      // Hidden helper window: do not bring the macOS Dock icon back in tray mode.
+      macShowInDock: false
+    }
+  },
+
+  // Hidden CDP browser surface for the built-in @cherry/browser MCP server.
+  // CdpBrowserController owns content (tab BrowserViews + tab bar), show timing,
+  // and close; the per-mode session partition (persist:default / private) is
+  // injected per open via wm.open({ options: { webPreferences } }).
+  [WindowType.McpBrowser]: {
+    type: WindowType.McpBrowser,
+    lifecycle: 'default',
+    htmlPath: '',
+    preload: '',
+    showMode: 'manual',
+    windowOptions: {
+      width: 1200,
+      height: 800,
+      webPreferences: {
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+        devTools: true
+      },
+      platformOverrides: {
+        // macOS keeps the native frame with window-controls overlay; Windows and
+        // Linux are frameless (the in-window tab bar renders its own controls).
+        mac: {
+          titleBarStyle: 'hidden',
+          titleBarOverlay: { height: 42 }, // WCO height (macOS)
+          trafficLightPosition: { x: 13, y: 13 }
+        },
+        win: { frame: false },
+        linux: { frame: false }
+      }
+    },
+    behavior: {
+      // Hidden-by-default helper window: do not bring the macOS Dock icon back in tray mode.
+      macShowInDock: false
     }
   },
 
@@ -161,7 +197,7 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
       warmup: 'eager'
     },
     htmlPath: 'windows/subWindow/index.html',
-    // preload omitted → defaults to 'index.js' (full API preload).
+    // preload omitted → defaults to 'preload.js' (full API preload).
     showMode: 'manual',
     windowOptions: {
       width: 800,
@@ -204,12 +240,22 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
         // focus switches. Mirrors the Main window's choice above; do not remove.
         backgroundThrottling: false
       }
+    },
+    behavior: {
+      // SubWindow must NOT contribute to the macOS Dock — a warm-created standby
+      // instance (standbySize:1 + warmup:'eager') is always resident and hidden.
+      // Without this flag, windowContributesToDock() returns true for it, so
+      // updateDockVisibility()'s some() never resolves to hide, and the Dock icon
+      // stays visible on close-to-tray / tray-on-launch (see issue #18186).
+      macShowInDock: false
     }
     // NOTE: Fields intentionally NOT set here, injected per-call via wm.open({ options }):
     //   - title (per-tab dynamic)
     //   - backgroundColor / darkTheme (theme snapshot at create time)
     //   - icon (Linux-only nativeImage; see SubWindowService.linuxIcon — mac/Windows omit)
     //   - x / y (only when Tab_Detach payload carries a drop position)
+    //   - zoomFactor (PreferenceService snapshot at open; pre-warmed standbys are
+    //     re-applied at pop — see SubWindowService.createWindow)
     // NOTE: setWindowOpenHandler + will-navigate are registered by WindowManager for
     // every BrowserWindow (see WindowManager.ts:1186-1201). SubWindow inherits both
     // automatically; do NOT attach another setWindowOpenHandler here or in the
@@ -224,7 +270,7 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
     type: WindowType.QuickAssistant,
     lifecycle: 'singleton',
     htmlPath: 'windows/quickAssistant/index.html',
-    // preload omitted → defaults to 'index.js' (full API preload).
+    // preload omitted → defaults to 'preload.js' (full API preload).
     // QuickAssistantService.showQuickAssistant controls visibility; showMode: 'manual' also keeps
     // singleton reopen (wm.open) from accidentally re-showing the window before reposition runs.
     showMode: 'manual',
@@ -272,17 +318,22 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
       // blur handler and its internal `isPinnedQuickAssistant` flag.
       // `new BrowserWindow({ alwaysOnTop: true })` cannot accept a level — the
       // floating level is applied by applyWindowBehavior on create, and kept
-      // across show cycles by the macReapplyAlwaysOnTop quirk below.
+      // across show cycles by the reapplyAlwaysOnTop quirk below.
       alwaysOnTop: { level: 'floating' },
       // Quick window is visible across all workspaces and over fullscreen apps.
-      visibleOnAllWorkspaces: { enabled: true, visibleOnFullScreen: true },
+      // `skipTransformProcessType: true` prevents TransformProcessType(UIElement)
+      // during window creation on macOS (app deactivation + Dock icon loss);
+      // MainWindowService's boot-time `app.dock?.show()` hack only masks that
+      // transform on the startup path, not on runtime re-creates.
+      visibleOnAllWorkspaces: { enabled: true, visibleOnFullScreen: true, skipTransformProcessType: true },
       // Quick window is a floating helper, not a primary surface — never touch the Dock.
       macShowInDock: false
     },
     quirks: {
-      // Re-apply the floating level after every show/showInactive — macOS silently
-      // demotes it across cycles. The actual level is read from `behavior.alwaysOnTop`.
-      macReapplyAlwaysOnTop: true
+      // Re-assert topmost after every show/showInactive — macOS silently demotes the
+      // level across cycles, Windows lets later topmost windows stack above.
+      // The actual level is read from `behavior.alwaysOnTop`.
+      reapplyAlwaysOnTop: true
     }
   },
 
@@ -292,7 +343,7 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
     type: WindowType.SelectionToolbar,
     lifecycle: 'singleton',
     htmlPath: 'windows/selection/toolbar/index.html',
-    // preload omitted → defaults to 'index.js'.
+    // preload omitted → defaults to 'preload.js'.
     // SelectionService controls visibility itself via showToolbarAtPosition/hideToolbar.
     // showMode: 'manual' also prevents wm.open() from re-showing an existing singleton unexpectedly.
     showMode: 'manual',
@@ -311,7 +362,15 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
       movable: true,
       hasShadow: false,
       thickFrame: false,
-      roundedCorners: true,
+      // The toolbar is a transparent, frameless pill that draws its own rounded
+      // background in CSS. Newer macOS enlarged
+      // the system window-corner radius, so with the OS rounding on, the window mask
+      // overrides the pill's own corners — the top (only 2px from the window edge)
+      // takes the larger OS radius while the bottom keeps the CSS radius, producing a
+      // visible top/bottom mismatch. Disable OS rounding and let the pill define its
+      // own shape. NOTE: Electron defaults roundedCorners to true, so this must be an
+      // explicit false — omitting it would fall back to the OS rounding.
+      roundedCorners: false,
 
       // Platform specific settings
       //   [macOS] DO NOT set focusable to false — it causes other windows to bring to front together.
@@ -357,12 +416,16 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
       // included) triggers the cleanup.
       hideOnBlur: true,
       alwaysOnTop: { level: 'screen-saver' },
-      // Baseline declaration only. SelectionService.showToolbarAtPosition has a
-      // per-show `!isSelf` branch that additionally sets
-      // `skipTransformProcessType: true`; it MUST stay there, because one-shot
-      // sinking that flag here would break the self / non-self distinction
-      // (Cherry Studio as the frontmost app needs the flag off, others need it on).
-      visibleOnAllWorkspaces: { enabled: true, visibleOnFullScreen: true },
+      // Baseline declaration, re-applied on every (re-)create. `skipTransformProcessType`
+      // MUST be true: without it, Electron runs TransformProcessType(UIElement) inside
+      // this call on macOS, which deactivates the whole app (every window drops behind
+      // the frontmost app) and removes the Dock icon — user-visible each time the
+      // selection assistant is toggled on (the toolbar is destroyed on disable and
+      // re-created on enable). SelectionService.showToolbarAtPosition still has its
+      // per-show `!isSelf` branch re-applying the same flags; it MUST stay there,
+      // because self-app shows must skip that call entirely or the active text
+      // selection gets canceled.
+      visibleOnAllWorkspaces: { enabled: true, visibleOnFullScreen: true, skipTransformProcessType: true },
       macShowInDock: false
     },
     // Declarative OS-specific workarounds — WindowManager monkey-patches instance methods
@@ -371,7 +434,7 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
     quirks: {
       macRestoreFocusOnHide: true,
       macClearHoverOnHide: true,
-      macReapplyAlwaysOnTop: true
+      reapplyAlwaysOnTop: true
     }
   },
 
@@ -381,7 +444,7 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
     type: WindowType.SelectionAction,
     lifecycle: 'pooled',
     htmlPath: 'windows/selection/action/index.html',
-    // preload omitted → defaults to 'index.js'.
+    // preload omitted → defaults to 'preload.js'.
     // SelectionService controls visibility itself via showActionWindow (computes bounds + fullscreen handling).
     showMode: 'manual',
     windowOptions: {
@@ -397,7 +460,7 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
       platformOverrides: {
         mac: {
           titleBarStyle: 'hidden', // [macOS]
-          trafficLightPosition: { x: 12, y: 9 } // [macOS]
+          trafficLightPosition: { x: 12, y: 11 } // [macOS]
         }
       },
       webPreferences: {
@@ -442,6 +505,99 @@ export const WINDOW_TYPE_REGISTRY: Partial<Record<WindowType, WindowTypeMetadata
       // permanent availability commitment.
       inactivityTimeout: 300,
       warmup: 'eager'
+    }
+  },
+
+  // Full-display capture overlay — one instance per display, opened and dismissed together.
+  // Pooled because a session creates N windows at once and users re-trigger it repeatedly.
+  [WindowType.Screenshot]: {
+    type: WindowType.Screenshot,
+    lifecycle: 'pooled',
+    htmlPath: 'windows/screenshot/index.html',
+    // preload omitted → defaults to 'preload.js'. OCR runs in the main process,
+    // so this window needs no nodeIntegration and keeps contextIsolation on.
+
+    // ScreenshotOverlayService owns visibility: overlays are shown at opacity 0 and revealed only
+    // once content has painted, so the OS window-open animation never shows over the frozen image.
+    showMode: 'manual',
+    windowOptions: {
+      frame: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      movable: false,
+      // frame:false hides the buttons, but OS shortcuts (e.g. Cmd+M) can still fire.
+      minimizable: false,
+      maximizable: false,
+      // Must be false on every platform: on Linux `true` keeps the overlay off the
+      // top layer; on macOS it conflicts with the panel window type.
+      fullscreen: false,
+      // macOS crashes when a transparent overlay window is fullscreenable.
+      fullscreenable: false,
+      hasShadow: false,
+      // Removes WS_THICKFRAME on Windows, killing the frameless show/hide animation.
+      // No effect elsewhere; safe because shadow and resizing are already off.
+      thickFrame: false,
+      backgroundColor: '#00000000',
+      focusable: true,
+      // Make the content area match the display exactly, excluding any frame.
+      useContentSize: true,
+      autoHideMenuBar: true,
+      // macOS: let the first click start a selection instead of only focusing.
+      acceptFirstMouse: true,
+      enableLargerThanScreen: true,
+      platformOverrides: {
+        mac: {
+          // Floating panel that does not steal app activation.
+          type: 'panel',
+          // OS corner rounding would reveal the desktop at the overlay's corners.
+          roundedCorners: false
+        },
+        win: {
+          // Toolbar windows stay above normal windows.
+          type: 'toolbar'
+        }
+        // Linux: no `type` at all — any value breaks focus events on some desktop
+        // environments (KDE, i3).
+      },
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        // Required by every window on the shared preload: that bundle is code-split, and a
+        // sandboxed preload cannot require its chunks — it dies with "module not found".
+        sandbox: false,
+        devTools: true,
+        // Declared on WebPreferences, NOT at the constructor-options root. Off because a red
+        // squiggle under the text-annotation input would be drawn into the annotation layer.
+        spellcheck: false
+      }
+    },
+    behavior: {
+      // screen-saver level puts the overlay above the Dock and menu bar.
+      alwaysOnTop: { level: 'screen-saver' },
+      // Keep the overlay on the Space where capture started while still allowing it
+      // above fullscreen apps. skipTransformProcessType avoids Dock/focus churn.
+      visibleOnAllWorkspaces: { enabled: false, visibleOnFullScreen: true, skipTransformProcessType: true },
+      macShowInDock: false
+    },
+    quirks: {
+      // ScreenshotOverlayService hides and re-shows every overlay so the macOS save panel can sit
+      // above them; macOS then drops the level and Windows loses topmost, returning it below the Dock.
+      reapplyAlwaysOnTop: true
+    },
+    poolConfig: {
+      // No standby: capture sessions are user-initiated and bursty, and a permanently
+      // warm overlay would hold a transparent window per display for nothing.
+      standbySize: 0,
+      // A capture session opens one window per display; 4 covers realistic setups.
+      recycleMaxSize: 4,
+      // No decay: a display count does not drift, so shedding one window a minute only
+      // guarantees that the next capture is cold again. The buffer is kept whole and
+      // released whole, 10 minutes after the last capture.
+      decayInterval: 0,
+      inactivityTimeout: 600,
+      warmup: 'lazy'
     }
   }
 }
@@ -523,5 +679,5 @@ export function mergeWindowOptions(
   // Strip platformOverrides from the returned object so it never leaks to `new BrowserWindow(...)`.
   const rest: Record<string, unknown> = { ...merged }
   delete rest.platformOverrides
-  return rest as Omit<WindowOptions, 'platformOverrides'>
+  return rest
 }

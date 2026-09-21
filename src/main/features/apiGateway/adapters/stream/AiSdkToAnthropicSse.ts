@@ -27,6 +27,7 @@ import type {
   RawMessageStartEvent,
   RawMessageStopEvent,
   RawMessageStreamEvent,
+  SignatureDelta,
   StopReason,
   TextBlock,
   TextDelta,
@@ -35,8 +36,9 @@ import type {
   ToolUseBlock,
   Usage
 } from '@anthropic-ai/sdk/resources/messages'
-import { loggerService } from '@logger'
 import type { FinishReason, UIMessageChunk } from 'ai'
+
+import { loggerService } from '@logger'
 
 import { googleReasoningCache, openRouterReasoningCache } from '../../reasoningCache'
 import type { GatewayUsageMetadata, StreamAdapterOptions } from '../interfaces'
@@ -66,8 +68,11 @@ const NULL_CONTAINER = null
  * ```
  */
 export class AiSdkToAnthropicSse extends BaseStreamAdapter<RawMessageStreamEvent> {
+  private readonly toClientToolName?: (toolName: string) => string
+
   constructor(options: StreamAdapterOptions) {
     super(options)
+    this.toClientToolName = options.toClientToolName
   }
 
   /**
@@ -135,10 +140,13 @@ export class AiSdkToAnthropicSse extends BaseStreamAdapter<RawMessageStreamEvent
         break
 
       case 'reasoning-delta':
+        // @ai-sdk/anthropic delivers the signature on an empty-delta chunk's metadata.
+        this.captureThinkingSignature(chunk.id, chunk.providerMetadata)
         this.emitThinkingDelta(chunk.delta || '', chunk.id)
         break
 
       case 'reasoning-end':
+        this.captureThinkingSignature(chunk.id, chunk.providerMetadata)
         this.stopThinkingBlock(chunk.id)
         break
 
@@ -147,10 +155,11 @@ export class AiSdkToAnthropicSse extends BaseStreamAdapter<RawMessageStreamEvent
       // no incremental input deltas to accumulate). Cache reasoning signatures
       // off its providerMetadata, then frame the Anthropic tool_use block.
       case 'tool-input-available': {
+        const toolName = this.toClientToolName?.(chunk.toolName) ?? chunk.toolName
         const meta = chunk.providerMetadata as Record<string, any> | undefined
         const thoughtSignature = meta?.google?.thoughtSignature
         if (googleReasoningCache && typeof thoughtSignature === 'string') {
-          googleReasoningCache.set(`google-${chunk.toolName}`, thoughtSignature)
+          googleReasoningCache.set(`google-${chunk.toolCallId}`, thoughtSignature)
         }
         const reasoningDetails = meta?.openrouter?.reasoning_details
         if (openRouterReasoningCache && Array.isArray(reasoningDetails)) {
@@ -158,7 +167,7 @@ export class AiSdkToAnthropicSse extends BaseStreamAdapter<RawMessageStreamEvent
         }
         this.handleToolCall({
           toolCallId: chunk.toolCallId,
-          toolName: chunk.toolName,
+          toolName,
           args: chunk.input
         })
         break
@@ -189,8 +198,8 @@ export class AiSdkToAnthropicSse extends BaseStreamAdapter<RawMessageStreamEvent
   /** Track cumulative usage from the `message-metadata` projection. */
   private applyUsageMetadata(metadata: GatewayUsageMetadata | undefined): void {
     if (!metadata) return
-    if (metadata.promptTokens !== undefined) this.state.inputTokens = metadata.promptTokens
-    if (metadata.completionTokens !== undefined) this.state.outputTokens = metadata.completionTokens
+    if (metadata.stats?.inputTokens !== undefined) this.state.inputTokens = metadata.stats.inputTokens
+    if (metadata.stats?.outputTokens !== undefined) this.state.outputTokens = metadata.stats.outputTokens
   }
 
   private startTextBlock(): void {
@@ -324,12 +333,32 @@ export class AiSdkToAnthropicSse extends BaseStreamAdapter<RawMessageStreamEvent
     this.emit(event)
   }
 
+  /** Store the upstream thinking signature so clients get a replayable block. */
+  private captureThinkingSignature(reasoningId: string | undefined, providerMetadata: unknown): void {
+    const signature = (providerMetadata as { anthropic?: { signature?: unknown } } | undefined)?.anthropic?.signature
+    if (typeof signature !== 'string' || !signature) return
+
+    const targetId = reasoningId || this.state.currentThinkingId
+    if (!targetId) return
+    const index = this.state.thinkingBlocks.get(targetId)
+    if (index === undefined) return
+    const block = this.state.blocks.get(index)
+    if (block) block.signature = signature
+  }
+
   private stopThinkingBlock(reasoningId?: string): void {
     const targetId = reasoningId || this.state.currentThinkingId
     if (!targetId) return
 
     const index = this.state.thinkingBlocks.get(targetId)
     if (index === undefined) return
+
+    const signature = this.state.blocks.get(index)?.signature
+    if (signature) {
+      const delta: SignatureDelta = { type: 'signature_delta', signature }
+      const deltaEvent: RawContentBlockDeltaEvent = { type: 'content_block_delta', index, delta }
+      this.emit(deltaEvent)
+    }
 
     const event: RawContentBlockStopEvent = {
       type: 'content_block_stop',
@@ -493,16 +522,16 @@ export class AiSdkToAnthropicSse extends BaseStreamAdapter<RawMessageStreamEvent
             type: 'text',
             text: block.content,
             citations: null
-          } as TextBlock)
+          })
           break
         case 'thinking':
           content.push({
             type: 'thinking',
             thinking: block.content,
-            // ThinkingBlock requires a signature; the gateway has no real one to
-            // forward, matching the empty signature used when the block is opened.
-            signature: ''
-          } as ThinkingBlock)
+            // Real signature when the upstream provided one; '' matches the empty
+            // signature used when the block is opened.
+            signature: block.signature ?? ''
+          })
           break
         case 'tool_use':
           content.push({

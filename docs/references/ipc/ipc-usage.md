@@ -1,3 +1,11 @@
+---
+description: Adding an IpcApi request route or main-to-renderer event — schema, handler, broadcast and send, useIpcOn subscribe
+sources:
+  - src/shared/ipc/schemas
+  - src/main/ipc/handlers
+  - src/renderer/ipc/useIpcOn.ts
+---
+
 # IpcApi Usage
 
 Two recurring tasks: adding a request route (R→M call) and adding an event (M→R push). A new request changes **2 places** (schema + handler); a new event changes **1 contract** plus its emit and subscribe sites. Preload and the channel enum never change.
@@ -12,14 +20,14 @@ import { defineRoute } from '../define'
 
 export const windowRequestSchemas = {
   // route: dot snake_case; payload fields stay camelCase
-  'window.set_minimum_size': defineRoute({
+  'window.main.set_minimum_size': defineRoute({
     input: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }),
     output: z.void()
   })
 }
 ```
 
-Register it in the composition (`src/shared/ipc/schemas/index.ts`):
+Register it in the composition (`src/shared/ipc/schemas/ipcSchemas.ts`):
 
 ```ts
 export const ipcRequestSchemas = {
@@ -30,18 +38,19 @@ export const ipcRequestSchemas = {
 ### 2. Implement the handler (`src/main/ipc/handlers/<domain>.ts`)
 
 ```ts
+import { application } from '@application'
 import type { IpcHandlersFor } from '@shared/ipc/types'
 import type { windowRequestSchemas } from '@shared/ipc/schemas/window'
 
 export const windowHandlers: IpcHandlersFor<typeof windowRequestSchemas> = {
-  // input is the parsed type; ctx.senderId is the caller WindowId (omit ctx if unused)
-  'window.set_minimum_size': async ({ width, height }, { senderId }) => {
-    if (senderId != null) application.get('WindowManager').setMinimumSize(senderId, width, height)
+  // input is parsed; this route deliberately targets the main-window singleton
+  'window.main.set_minimum_size': async ({ width, height }) => {
+    application.get('MainWindowService').setMainWindowMinimumSize(width, height)
   }
 }
 ```
 
-Register it (`src/main/ipc/handlers/index.ts`):
+Register it (`src/main/ipc/handlers/ipcHandlers.ts`):
 
 ```ts
 export const ipcHandlers: IpcHandlersFor<IpcRequestSchemas> = {
@@ -56,7 +65,7 @@ Miss a declared route → compile error. Add a handler for an undeclared route �
 ```ts
 import { ipcApi } from '@renderer/ipc'
 
-await ipcApi.request('window.set_minimum_size', { width: 800, height: 600 })
+await ipcApi.request('window.main.set_minimum_size', { width: 800, height: 600 })
 const info = await ipcApi.request('app.get_info') // void input → no second argument
 ```
 
@@ -66,7 +75,7 @@ const info = await ipcApi.request('app.get_info') // void input → no second ar
 
 To signal a failure the renderer must branch on, throw an `IpcError` with a **domain code** — `IpcApiService` serializes it into `{ ok: false, error }` and the renderer facade rebuilds the `IpcError` and rejects. Do **not** throw the framework codes (`VALIDATION_FAILED` / `ROUTE_NOT_FOUND` / `FORBIDDEN_SENDER` / `INTERNAL`) by hand — the router owns those, and any uncaught non-`IpcError` throw is normalized to `INTERNAL` for you. See the [error model](./ipc-overview.md#error-codes--ipcerrorcode) for the framework-vs-domain-code rule and why codes live under `errors/`, not `schemas/`.
 
-Put the domain's codes in `@shared/ipc/errors/<domain>.ts` as an `as const` map, and import it **directly** on both sides (no barrel — there is no aggregated `errors/index.ts` export of domain codes):
+Put the domain's codes in `@shared/ipc/errors/<domain>.ts` as an `as const` map, and import it **directly** on both sides (no barrel — `errors/` has no aggregating index; each domain map is imported directly):
 
 ```ts
 // src/shared/ipc/errors/file.ts — the domain's code map (zod-free, value-importable by both processes)
@@ -75,7 +84,7 @@ export const fileErrorCodes = { FILE_NOT_FOUND: 'FILE_NOT_FOUND' } as const
 
 ```ts
 // main handler (src/main/ipc/handlers/file.ts)
-import { IpcError } from '@shared/ipc/errors'
+import { IpcError } from '@shared/ipc/errors/IpcError'
 import { fileErrorCodes } from '@shared/ipc/errors/file'
 
 'file.read_doc': async ({ path }) => {
@@ -89,7 +98,7 @@ import { fileErrorCodes } from '@shared/ipc/errors/file'
 
 ```ts
 // renderer — branch on the rebuilt IpcError's `code` using the same constant
-import { IpcError } from '@shared/ipc/errors'
+import { IpcError } from '@shared/ipc/errors/IpcError'
 import { fileErrorCodes } from '@shared/ipc/errors/file'
 
 try {
@@ -105,48 +114,58 @@ try {
 ### 1. Declare the contract (Event block of `schemas/<domain>.ts`)
 
 ```ts
-export type WindowEventSchemas = {
-  'window.maximized_changed': { maximized: boolean }
+import type { ThemeMode } from '@shared/data/preference/preferenceTypes'
+
+export type SystemEventSchemas = {
+  'system.native_theme_updated': ThemeMode
 }
 ```
 
-Register it in the composition (`schemas/index.ts`):
+Register it in the composition (`schemas/ipcSchemas.ts`):
 
 ```ts
-export type IpcEventSchemas = WindowEventSchemas & AppEventSchemas
+export type IpcEventSchemas = SystemEventSchemas & AppEventSchemas
 ```
 
 ### 2. Emit from a main service
 
 ```ts
-// to all windows
-application.get('IpcApiService').broadcast('window.maximized_changed', { maximized: true })
-// to one window (e.g. the caller, by its WindowId)
-application.get('IpcApiService').send(windowId, 'window.maximized_changed', { maximized: true })
+import { application } from '@application'
+import { WindowType } from '@main/core/window/types'
+
+// to all windows (ThemeService)
+application.get('IpcApiService').broadcast('system.native_theme_updated', theme)
+// to all windows of one type (AppUpdaterService)
+application.get('IpcApiService').broadcastToType(WindowType.Main, 'app.updater.not_available', undefined)
+// to one window (WindowManager)
+application.get('IpcApiService').send(windowId, 'window.maximized_changed', true)
 ```
 
 ### 3. Subscribe in the renderer
 
 ```ts
-import { useIpcOn } from '@renderer/ipc/useIpcOn'
+import { useIpcOn } from '@renderer/ipc'
 
-useIpcOn('window.maximized_changed', ({ maximized }) => setMax(maximized)) // cleanup is automatic
+useIpcOn('system.native_theme_updated', setActualTheme) // cleanup is automatic
 ```
 
 Outside React, use the imperative form:
 
 ```ts
-const unsubscribe = ipcApi.on('window.maximized_changed', (p) => { /* ... */ })
+import { ipcApi } from '@renderer/ipc'
+
+const unsubscribe = ipcApi.on('system.native_theme_updated', (theme) => { /* ... */ })
 ```
 
 ## Handler: Pure Function vs Service Delegate
 
 | Capability | Where the handler lives |
 |---|---|
-| Stateless (app info, font list) | Pure function directly in `handlers/` — no service needed |
-| Stateful (MCP / Knowledge / Window) | Handler in `handlers/`, delegating via `application.get('XxxService').method()`; business logic and resource lifecycle stay in the service |
+| Small stateless logic (app info, font list) | Pure function directly in `handlers/` — no service needed |
+| Lifecycle service (MCP / Knowledge / Window — registered in `serviceRegistry.ts`) | Handler in `handlers/`, delegating via `application.get('XxxService').method()`; business logic and resource lifecycle stay in the service |
+| Non-lifecycle module (file topic, `printService`, `regionService`) | Handler in `handlers/`, importing the module's curated entry (topic barrel or direct-import singleton) and delegating — no DI handle exists and none should be fabricated |
 
-The `handlers/` directory is the single audited list of every main capability the renderer can reach.
+The `handlers/` directory is the single audited list of capabilities exposed through IpcApi. Remaining legacy/data-subsystem channels stay outside it until their documented migration or carve-out is complete.
 
 ## Testing
 

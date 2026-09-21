@@ -1,4 +1,3 @@
-import type { Serializable } from '@shared/types/serializable'
 import type {
   AISDKError,
   APICallError,
@@ -20,6 +19,8 @@ import type {
   TypeValidationError,
   UnsupportedFunctionalityError
 } from 'ai'
+
+import type { Serializable } from '@shared/types/serializable'
 
 import type { ProviderSpecificError } from './providerSpecificError'
 
@@ -56,7 +57,7 @@ export const isSerializedAiSdkError = (error: SerializedError): error is Seriali
   return 'cause' in error
 }
 
-export interface SerializedAiSdkAPICallError extends SerializedAiSdkError {
+export interface SerializedAiSdkApiCallError extends SerializedAiSdkError {
   readonly url: string
   readonly requestBodyValues: Serializable
   readonly statusCode: number | null
@@ -66,7 +67,7 @@ export interface SerializedAiSdkAPICallError extends SerializedAiSdkError {
   readonly data: Serializable | null
 }
 
-export const isSerializedAiSdkAPICallError = (error: SerializedError): error is SerializedAiSdkAPICallError => {
+export const isSerializedAiSdkApiCallError = (error: SerializedError): error is SerializedAiSdkApiCallError => {
   return (
     isSerializedAiSdkError(error) &&
     'url' in error &&
@@ -311,7 +312,7 @@ export type AiSdkErrorUnion =
   | UnsupportedFunctionalityError
 
 export type SerializedAiSdkErrorUnion =
-  | SerializedAiSdkAPICallError
+  | SerializedAiSdkApiCallError
   | SerializedAiSdkDownloadError
   | SerializedAiSdkInvalidArgumentError
   | SerializedAiSdkInvalidDataContentError
@@ -333,7 +334,7 @@ export type SerializedAiSdkErrorUnion =
 
 export const isSerializedAiSdkErrorUnion = (error: SerializedError): error is SerializedAiSdkErrorUnion => {
   return (
-    isSerializedAiSdkAPICallError(error) ||
+    isSerializedAiSdkApiCallError(error) ||
     isSerializedAiSdkDownloadError(error) ||
     isSerializedAiSdkInvalidArgumentError(error) ||
     isSerializedAiSdkInvalidDataContentError(error) ||

@@ -32,7 +32,12 @@ const SendMessageButton: FC<Props> = ({ disabled, onDisabledClick, sendMessage }
 
   return (
     <i
+      data-ui="chat.composer.action.send"
       className="iconfont icon-ic_send"
+      onMouseDown={(event) => {
+        // Pointer submission should keep focus in the composer.
+        if (event.button === 0) event.preventDefault()
+      }}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
       role="button"
@@ -41,7 +46,7 @@ const SendMessageButton: FC<Props> = ({ disabled, onDisabledClick, sendMessage }
       tabIndex={disabled ? -1 : 0}
       style={{
         cursor: disabled ? 'not-allowed' : 'pointer',
-        color: disabled ? 'var(--color-foreground-muted)' : 'var(--color-primary)',
+        color: disabled ? 'var(--foreground-disabled)' : 'var(--primary)',
         fontSize: 22,
         transition: 'all 0.2s',
         marginTop: 1,

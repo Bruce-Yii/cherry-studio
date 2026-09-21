@@ -1,20 +1,39 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import type { UserEvent } from '@testing-library/user-event'
+import userEvent from '@testing-library/user-event'
+import * as React from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type * as CherryStudioUI from '@cherrystudio/ui'
 import type {
   EntitySearchResponse,
   SessionMessageContentSearchItem,
   TopicMessageContentSearchItem
 } from '@shared/data/api/schemas/search'
 import type { GlobalSearchRecentEntry, Tab } from '@shared/data/cache/cacheValueTypes'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
-import * as React from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GLOBAL_SEARCH_MESSAGE_PREVIEW_LIMIT } from '../globalSearchGroups'
 
 type ReactModule = typeof React
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
+const SEARCH_INPUT_LABEL = 'Search conversations, tasks, assistants, agents, and knowledge...'
+
+// Types into the search input and waits until the debounced query commits:
+// query-gated UI (filter controls, results) mounts only once a query is active.
+async function typeSearchQuery(user: UserEvent, text: string) {
+  await user.type(screen.getByLabelText(SEARCH_INPUT_LABEL), text)
+  await screen.findByRole('radio', { name: 'Messages' })
+}
 
 const mocks = vi.hoisted(() => ({
   openTab: vi.fn(),
@@ -24,15 +43,34 @@ const mocks = vi.hoisted(() => ({
   messageQueryResult: undefined as { items: TopicMessageContentSearchItem[]; nextCursor?: string } | undefined,
   sessionMessageQueryResult: undefined as { items: SessionMessageContentSearchItem[]; nextCursor?: string } | undefined,
   keepStaleContentSearchData: false,
+  // When true, the entities query reports itself as refreshing — the window in
+  // which the aligned query's response has not landed yet.
+  entitiesSearchRefreshing: false,
+  // When set, the entities query reports a terminal error for the aligned
+  // query — the window in which keepPreviousData still renders the stale list.
+  entitiesSearchError: undefined as unknown,
+  // When set, the contents (message) query reports a terminal error — the panel
+  // renders the error state and hides the listbox while the keyboard selection
+  // still references the retained rows.
+  messageSearchError: undefined as unknown,
+  // When true, the useDeferredValue mock below keeps returning the previous
+  // value, mimicking the frame in which React has committed a new query but
+  // has not yet re-rendered the deferred lane.
+  holdDeferredValue: false,
   recentItems: [] as GlobalSearchRecentEntry[],
   pinnedMiniApps: [] as any[],
   openedMiniApps: [] as any[],
   tabs: [] as Tab[],
   preferenceValues: {
     'app.user.name': 'JD',
-    'ui.sidebar.favorites': ['assistants', 'agents', 'translate'],
+    'ui.sidebar_shortcut': [
+      { type: 'app', id: 'assistants' },
+      { type: 'app', id: 'agents' },
+      { type: 'app', id: 'translate' }
+    ],
     'feature.paintings.default_provider': 'zhipu'
   } as Record<string, unknown>,
+  casualCache: new Map<string, unknown>(),
   persistCacheValues: {
     'ui.chat.last_used_topic_id': undefined,
     'ui.agent.last_used_session_id': undefined
@@ -48,9 +86,9 @@ const mocks = vi.hoisted(() => ({
   dataApiPut: vi.fn(),
   invalidateCache: vi.fn(),
   eventEmit: vi.fn(),
+  emitResourceListReveal: vi.fn(),
   virtualListScrollToIndex: vi.fn(),
   loggerError: vi.fn(),
-  toastError: vi.fn(),
   activeTab: {
     id: 'chat',
     type: 'route',
@@ -60,7 +98,26 @@ const mocks = vi.hoisted(() => ({
   updateTab: vi.fn()
 }))
 
-vi.mock('@cherrystudio/ui', async () => {
+// Test-controllable useDeferredValue: with `mocks.holdDeferredValue` set, the
+// hook keeps returning the previous value, reproducing the frame in which the
+// debounce commit has landed but the deferred re-render has not. Default
+// (false) is a passthrough so other tests see no deferral lag.
+vi.mock('react', async () => {
+  const actual = await vi.importActual<ReactModule>('react')
+  return {
+    ...actual,
+    useDeferredValue: <T,>(value: T): T => {
+      const lastValueRef = actual.useRef(value)
+      if (!mocks.holdDeferredValue) {
+        lastValueRef.current = value
+      }
+      return lastValueRef.current
+    }
+  }
+})
+
+vi.mock('@cherrystudio/ui', async (importOriginal) => {
+  const actual = await importOriginal<typeof CherryStudioUI>()
   const React = await vi.importActual<ReactModule>('react')
   const DropdownMenuContext = React.createContext<{
     open: boolean
@@ -72,6 +129,7 @@ vi.mock('@cherrystudio/ui', async () => {
   } | null>(null)
 
   return {
+    ...actual,
     Button: ({
       children,
       type = 'button',
@@ -212,17 +270,18 @@ vi.mock('@cherrystudio/ui', async () => {
   }
 })
 
-vi.mock('@renderer/components/resource/dialogs', () => ({
+vi.mock('@renderer/components/resourceCatalog/dialogs/edit', () => ({
   ResourceEditDialogHost: ({ target }: { target: { kind: string; id: string } | null }) =>
     target ? <div data-testid="resource-edit-dialog-host" data-kind={target.kind} data-id={target.id} /> : null
 }))
 
-vi.mock('@renderer/components/Icons/SvgIcon', () => ({
+vi.mock('@renderer/components/icons/SvgIcon', () => ({
+  McpLogo: (props: React.ComponentProps<'svg'>) => <svg aria-hidden="true" {...props} />,
   OpenClawIcon: (props: React.ComponentProps<'svg'>) => <svg aria-hidden="true" {...props} />,
   OpenClawSidebarIcon: (props: React.ComponentProps<'svg'>) => <svg aria-hidden="true" {...props} />
 }))
 
-vi.mock('@renderer/components/Icons/MiniAppIcon', () => ({
+vi.mock('@renderer/components/icons/MiniAppIcon', () => ({
   default: ({ app }: any) => <span aria-hidden="true">{app.logo ?? 'mini-app-icon'}</span>
 }))
 
@@ -311,32 +370,21 @@ vi.mock('@renderer/hooks/tab', () => ({
   })
 }))
 
-// Instance navigation goes through the conversation-nav boundary; route it to the same
-// openTab spy so the existing focus-or-open assertions keep verifying the target url.
+// Conversation navigation goes through the conversation-nav boundary; route it to the same
+// openTab spy so assertions keep verifying the target URL.
 vi.mock('@renderer/hooks/useConversationNavigation', () => ({
-  useConversationNavigator: () => ({
-    focusExistingTab: () => false,
-    openConversationTab: (appId: string, key: string, title?: string) => {
-      const routePrefix = appId === 'agents' ? '/app/agents' : '/app/chat'
-      const instanceAppId = appId === 'agents' ? 'agents' : 'assistants'
-      return mocks.openTab(routePrefix, {
-        forceNew: true,
-        ...(title ? { title } : {}),
-        metadata: { instanceAppId, instanceKey: key }
-      })
-    }
-  }),
   useConversationNavigation: (appId: string) => {
-    const routePrefix = appId === 'agents' ? '/app/agents' : '/app/chat'
-    const instanceAppId = appId === 'agents' ? 'agents' : 'assistants'
     return {
-      focusExistingTab: () => false,
-      openConversationTab: (key: string, title?: string) =>
-        mocks.openTab(routePrefix, {
+      openConversationTab: (key: string, title?: string) => {
+        const url =
+          appId === 'agents'
+            ? `/app/agents?sessionId=${encodeURIComponent(key)}`
+            : `/app/chat?topicId=${encodeURIComponent(key)}`
+        return mocks.openTab(url, {
           forceNew: true,
-          ...(title ? { title } : {}),
-          metadata: { instanceAppId, instanceKey: key }
+          ...(title ? { title } : {})
         })
+      }
     }
   }
 }))
@@ -370,7 +418,11 @@ vi.mock('@renderer/utils/routeTitle', () => ({
 }))
 
 vi.mock('@data/CacheService', () => ({
-  cacheService: { set: mocks.cacheSet }
+  cacheService: {
+    set: mocks.cacheSet,
+    hasCasual: (key: string) => mocks.casualCache.has(key),
+    setCasual: (key: string, value: unknown) => mocks.casualCache.set(key, value)
+  }
 }))
 
 vi.mock('@data/DataApiService', () => {
@@ -399,8 +451,13 @@ vi.mock('@logger', () => ({
 }))
 
 vi.mock('@renderer/hooks/useTopic', () => ({
+  useTopicById: () => ({}),
   mapApiTopicToRendererTopic: (topic: unknown) => topic
 }))
+
+vi.mock('@renderer/hooks/useAssistant', () => ({ useAssistantApiById: () => ({}) }))
+vi.mock('@renderer/hooks/agent/useSession', () => ({ useSession: () => ({}) }))
+vi.mock('@renderer/hooks/agent/useAgent', () => ({ useAgent: () => ({}) }))
 
 vi.mock('@renderer/services/EventService', () => ({
   EVENT_NAMES: {
@@ -412,6 +469,10 @@ vi.mock('@renderer/services/EventService', () => ({
     GLOBAL_SEARCH_SELECT_KNOWLEDGE_BASE: 'GLOBAL_SEARCH_SELECT_KNOWLEDGE_BASE'
   },
   EventEmitter: { emit: mocks.eventEmit }
+}))
+
+vi.mock('@renderer/services/resourceListRevealEvents', () => ({
+  emitResourceListReveal: mocks.emitResourceListReveal
 }))
 
 vi.mock('@renderer/utils/style', () => ({
@@ -539,8 +600,11 @@ vi.mock('react-i18next', () => ({
   })
 }))
 
-import { GlobalSearchPanel, testOnlyClearRefreshHistory } from '../GlobalSearchPanel'
+import { toast } from '@renderer/services/toast'
+
+import { GlobalSearchPanel } from '../GlobalSearchPanel'
 import { getGlobalSearchOptionDomId, GLOBAL_MESSAGE_SEARCH_LOAD_MORE_ITEM_ID } from '../useGlobalSearchKeyboard'
+import { GLOBAL_SEARCH_QUERY_DEBOUNCE_MS } from '../useImeAwareDebouncedValue'
 
 afterEach(() => {
   cleanup()
@@ -549,7 +613,14 @@ afterEach(() => {
 
 describe('GlobalSearchPanel', () => {
   beforeEach(() => {
-    testOnlyClearRefreshHistory()
+    mocks.casualCache.clear()
+    // Conversation tabs open on the conversation's own URL (`/app/chat?topicId=…`), so match the
+    // route prefix rather than the bare path.
+    mocks.openTab.mockImplementation((route: string) => {
+      if (route.startsWith('/app/agents')) return 'opened-agent-tab'
+      if (route.startsWith('/app/chat')) return 'opened-chat-tab'
+      return 'opened-route-tab'
+    })
     mocks.recentItems = [
       {
         kind: 'topic',
@@ -566,7 +637,11 @@ describe('GlobalSearchPanel', () => {
     mocks.sessionMessageQueryResult = undefined
     mocks.preferenceValues = {
       'app.user.name': 'JD',
-      'ui.sidebar.favorites': ['assistants', 'agents', 'translate'],
+      'ui.sidebar_shortcut': [
+        { type: 'app', id: 'assistants' },
+        { type: 'app', id: 'agents' },
+        { type: 'app', id: 'translate' }
+      ],
       'feature.paintings.default_provider': 'zhipu'
     }
     mocks.persistCacheValues = {
@@ -581,7 +656,10 @@ describe('GlobalSearchPanel', () => {
       title: 'Chat'
     }
     mocks.keepStaleContentSearchData = false
-    window.toast = { error: mocks.toastError } as unknown as typeof window.toast
+    mocks.entitiesSearchRefreshing = false
+    mocks.entitiesSearchError = undefined
+    mocks.messageSearchError = undefined
+    mocks.holdDeferredValue = false
     mocks.useQuery.mockImplementation(
       (
         path: string,
@@ -594,8 +672,8 @@ describe('GlobalSearchPanel', () => {
           return {
             data: mocks.queryResult,
             isLoading: false,
-            isRefreshing: false,
-            error: undefined
+            isRefreshing: mocks.entitiesSearchRefreshing,
+            error: mocks.entitiesSearchError
           }
         }
 
@@ -633,7 +711,7 @@ describe('GlobalSearchPanel', () => {
             },
             isLoading: false,
             isRefreshing: false,
-            error: undefined
+            error: mocks.messageSearchError
           }
         }
 
@@ -653,6 +731,21 @@ describe('GlobalSearchPanel', () => {
     await waitFor(() => {
       expect(screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...')).toHaveFocus()
     })
+  })
+
+  it('keeps the search input focused after clearing the query', async () => {
+    const user = userEvent.setup()
+    render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    const searchInput = screen.getByRole('combobox', {
+      name: 'Search conversations, tasks, assistants, agents, and knowledge...'
+    })
+    await user.type(searchInput, 'needle')
+    await user.click(screen.getByRole('button', { name: 'Clear search' }))
+
+    expect(searchInput).toHaveFocus()
+    await user.keyboard('second query')
+    expect(searchInput).toHaveValue('second query')
   })
 
   it('links the search input to the visible recent listbox', async () => {
@@ -701,10 +794,7 @@ describe('GlobalSearchPanel', () => {
     expect(screen.queryByRole('button', { name: 'Manage' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Search type: Conversation' })).not.toBeInTheDocument()
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'assistant'
-    )
+    await typeSearchQuery(user, 'assistant')
 
     await waitFor(() => {
       const searchInput = screen.getByRole('combobox', {
@@ -732,6 +822,36 @@ describe('GlobalSearchPanel', () => {
         })
       })
     )
+  })
+
+  it('shows conversation activity time instead of a newer metadata update time', async () => {
+    const user = userEvent.setup()
+    const lastActivityAt = new Date(Date.now() - 2 * 60 * 1000).toISOString()
+    mocks.recentItems = []
+    mocks.queryResult = {
+      query: 'topic',
+      groups: [
+        {
+          type: 'topic',
+          items: [
+            {
+              type: 'topic',
+              id: 'topic-1',
+              title: 'Old conversation',
+              lastActivityAt,
+              updatedAt: new Date().toISOString(),
+              target: { topicId: 'topic-1' }
+            }
+          ]
+        }
+      ]
+    }
+
+    render(<GlobalSearchPanel onClose={mocks.onClose} />)
+    await typeSearchQuery(user, 'topic')
+
+    expect(await screen.findByRole('option', { name: /Old conversation/ })).toBeInTheDocument()
+    expect(screen.getByText('2 minutes ago')).toBeInTheDocument()
   })
 
   it('scrolls the visible virtual list when keyboard selection moves', async () => {
@@ -820,7 +940,7 @@ describe('GlobalSearchPanel', () => {
     const user = userEvent.setup()
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
-    await user.type(screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'), 'query')
+    await typeSearchQuery(user, 'query')
 
     expect(screen.queryByText('Quick apps')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Chat' })).not.toBeInTheDocument()
@@ -834,7 +954,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'), 'plan')
+    await typeSearchQuery(user, 'plan')
     await user.click(screen.getByRole('button', { name: 'Search type: Conversation' }))
 
     await waitFor(() => {
@@ -856,7 +976,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'), 'plan')
+    await typeSearchQuery(user, 'plan')
     await user.click(screen.getByRole('button', { name: 'Search type: Task' }))
 
     await waitFor(() => {
@@ -878,7 +998,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'), 'plan')
+    await typeSearchQuery(user, 'plan')
     const topicFilter = screen.getByRole('button', { name: 'Search type: Conversation' })
     await user.click(topicFilter)
     expect(topicFilter).toHaveAttribute('aria-pressed', 'true')
@@ -905,7 +1025,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'), 'docs')
+    await typeSearchQuery(user, 'docs')
     await user.click(screen.getByRole('button', { name: 'Search type: Knowledge' }))
 
     await waitFor(() => {
@@ -919,6 +1039,116 @@ describe('GlobalSearchPanel', () => {
           })
         })
       )
+    })
+  })
+
+  it('does not emit a topic selection when no target tab is opened', async () => {
+    const user = userEvent.setup()
+    mocks.recentItems = []
+    mocks.openTab.mockImplementationOnce(() => undefined)
+    mocks.dataApiGet.mockResolvedValueOnce({
+      id: 'topic-1',
+      name: 'Topic A',
+      assistantId: 'assistant-1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      messages: []
+    })
+    mocks.queryResult = {
+      query: 'topic',
+      groups: [
+        {
+          type: 'topic',
+          items: [
+            {
+              type: 'topic',
+              id: 'topic-1',
+              title: 'Topic A',
+              target: { topicId: 'topic-1' }
+            }
+          ]
+        }
+      ]
+    }
+
+    render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    await typeSearchQuery(user, 'topic')
+    await user.click(await screen.findByRole('option', { name: /Topic A/ }))
+
+    expect(mocks.openTab).toHaveBeenCalledWith('/app/chat?topicId=topic-1', { forceNew: true })
+    expect(mocks.emitResourceListReveal).not.toHaveBeenCalled()
+    expect(mocks.eventEmit).not.toHaveBeenCalledWith('GLOBAL_SEARCH_SELECT_TOPIC', expect.anything())
+    expect(mocks.onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('reveals the assistant resource list when opening a topic result', async () => {
+    const user = userEvent.setup()
+    mocks.recentItems = []
+    mocks.dataApiGet.mockResolvedValueOnce({
+      id: 'topic-1',
+      name: 'Topic A',
+      assistantId: 'assistant-1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      messages: []
+    })
+    mocks.queryResult = {
+      query: 'topic',
+      groups: [
+        {
+          type: 'topic',
+          items: [
+            {
+              type: 'topic',
+              id: 'topic-1',
+              title: 'Topic A',
+              target: { topicId: 'topic-1' }
+            }
+          ]
+        }
+      ]
+    }
+
+    render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    await typeSearchQuery(user, 'topic')
+    await user.click(await screen.findByRole('option', { name: /Topic A/ }))
+
+    expect(mocks.emitResourceListReveal).toHaveBeenCalledWith({
+      source: 'assistants',
+      tabId: 'opened-chat-tab'
+    })
+  })
+
+  it('reveals the agent resource list when opening a session result', async () => {
+    const user = userEvent.setup()
+    mocks.recentItems = []
+    mocks.queryResult = {
+      query: 'session',
+      groups: [
+        {
+          type: 'session',
+          items: [
+            {
+              type: 'session',
+              id: 'session-1',
+              title: 'Session A',
+              target: { sessionId: 'session-1', agentId: 'agent-1' }
+            }
+          ]
+        }
+      ]
+    }
+
+    render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    await typeSearchQuery(user, 'session')
+    await user.click(await screen.findByRole('option', { name: /Session A/ }))
+
+    expect(mocks.emitResourceListReveal).toHaveBeenCalledWith({
+      source: 'agents',
+      tabId: 'opened-agent-tab'
     })
   })
 
@@ -950,7 +1180,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'), 'plan')
+    await typeSearchQuery(user, 'plan')
 
     expect(await screen.findByRole('option', { name: /Topic 0/ })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: /Topic 4/ })).toBeInTheDocument()
@@ -985,10 +1215,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
 
     expect(await screen.findByText('Topic A')).toBeInTheDocument()
     expect(screen.getByText('Conversation messages')).toBeInTheDocument()
@@ -1039,10 +1266,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     await user.click(screen.getByRole('button', { name: 'Message source: Conversation messages' }))
     await user.click(screen.getByRole('radio', { name: 'All' }))
@@ -1070,10 +1294,7 @@ describe('GlobalSearchPanel', () => {
     const user = userEvent.setup()
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
 
     const messageSearchButton = screen.getByRole('radio', { name: 'Messages' })
     const filterButton = screen.getByRole('button', { name: 'Search type: Conversation' })
@@ -1127,10 +1348,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     await user.click(screen.getByRole('button', { name: 'Message source: Conversation messages' }))
 
@@ -1175,10 +1393,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     await user.click(screen.getByRole('button', { name: 'Created time: Any time' }))
     expect(screen.getByRole('menuitemradio', { name: 'Any time' })).toHaveAttribute('aria-checked', 'true')
@@ -1204,10 +1419,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'assistant'
-    )
+    await typeSearchQuery(user, 'assistant')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     expect(screen.getByRole('button', { name: 'Message source: Conversation messages' })).toBeInTheDocument()
 
@@ -1236,10 +1448,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'report'
-    )
+    await typeSearchQuery(user, 'report')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     await user.click(screen.getByRole('button', { name: 'Message source: Task messages' }))
 
@@ -1287,10 +1496,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     expect(await screen.findByRole('option', { name: /needle session reply/ })).toBeInTheDocument()
 
@@ -1318,10 +1524,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'report'
-    )
+    await typeSearchQuery(user, 'report')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     const sessionSourceFilter = screen.getByRole('button', { name: 'Message source: Task messages' })
 
@@ -1391,10 +1594,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
 
     expect(await screen.findByText('Topic A')).toBeInTheDocument()
@@ -1406,8 +1606,9 @@ describe('GlobalSearchPanel', () => {
     expect(screen.getByRole('option', { name: /needle message one/ })).toBeInTheDocument()
   })
 
-  it('opens a topic message preview before locating the selected message', async () => {
+  it('starts both topic message reads before locating the selected message', async () => {
     const user = userEvent.setup()
+    mocks.recentItems = []
     const topic = {
       id: 'topic-1',
       name: 'Topic A',
@@ -1416,11 +1617,13 @@ describe('GlobalSearchPanel', () => {
       updatedAt: '2026-01-01T00:00:00.000Z',
       messages: []
     }
+    const topicRequest = createDeferred<typeof topic>()
+    const messagePathRequest = createDeferred<Array<{ id: string }>>()
     mocks.dataApiGet.mockImplementation((path: string) => {
       if (path === '/topics/topic-1/path') {
-        return Promise.resolve([{ id: 'message-1' }, { id: 'message-leaf' }])
+        return messagePathRequest.promise
       }
-      return Promise.resolve(topic)
+      return topicRequest.promise
     })
     mocks.messageQueryResult = {
       items: [
@@ -1438,10 +1641,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     await user.click(await screen.findByRole('option', { name: /needle topic reply/ }))
 
@@ -1454,21 +1654,29 @@ describe('GlobalSearchPanel', () => {
     await user.click(screen.getByRole('button', { name: 'Open preview target' }))
 
     await waitFor(() => {
-      expect(mocks.dataApiGet).toHaveBeenCalledWith('/topics/topic-1/path', { query: { nodeId: 'message-1' } })
+      expect(mocks.dataApiGet).toHaveBeenNthCalledWith(1, '/topics/topic-1')
+      expect(mocks.dataApiGet).toHaveBeenNthCalledWith(2, '/topics/topic-1/path', {
+        query: { nodeId: 'message-1' }
+      })
+    })
+    expect(mocks.dataApiGet).toHaveBeenCalledTimes(2)
+
+    topicRequest.resolve(topic)
+    messagePathRequest.resolve([{ id: 'message-1' }, { id: 'message-leaf' }])
+
+    await waitFor(() => {
       expect(mocks.dataApiPut).toHaveBeenCalledWith('/topics/topic-1/active-node', {
         body: { nodeId: 'message-leaf' }
       })
       expect(mocks.invalidateCache).toHaveBeenCalledWith(['/topics/topic-1/messages', '/topics/topic-1/tree'])
-      expect(mocks.openTab).toHaveBeenCalledWith('/app/chat', {
-        forceNew: true,
-        metadata: { instanceAppId: 'assistants', instanceKey: 'topic-1' }
-      })
+      expect(mocks.openTab).toHaveBeenCalledWith('/app/chat?topicId=topic-1', { forceNew: true })
     })
     await waitFor(() => {
       expect(mocks.eventEmit).toHaveBeenCalledWith(
         'GLOBAL_SEARCH_SELECT_TOPIC_MESSAGE',
         expect.objectContaining({
           messageId: 'message-1',
+          targetTabId: 'opened-chat-tab',
           topic: expect.objectContaining({ activeNodeId: 'message-leaf', id: 'topic-1' })
         })
       )
@@ -1512,10 +1720,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     const messageOption = await screen.findByRole('option', { name: /needle topic reply/ })
     expect(screen.queryByRole('button', { name: 'Jump to message' })).not.toBeInTheDocument()
@@ -1532,6 +1737,7 @@ describe('GlobalSearchPanel', () => {
         'GLOBAL_SEARCH_SELECT_TOPIC_MESSAGE',
         expect.objectContaining({
           messageId: 'message-1',
+          targetTabId: 'opened-chat-tab',
           topic: expect.objectContaining({ activeNodeId: 'message-leaf', id: 'topic-1' })
         })
       )
@@ -1571,10 +1777,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     await user.click(await screen.findByRole('option', { name: /needle topic reply/ }))
     await user.click(screen.getByRole('button', { name: 'Open preview other message' }))
@@ -1585,7 +1788,7 @@ describe('GlobalSearchPanel', () => {
       })
       expect(mocks.eventEmit).toHaveBeenCalledWith(
         'GLOBAL_SEARCH_SELECT_TOPIC_MESSAGE',
-        expect.objectContaining({ messageId: 'preview-message-other' })
+        expect.objectContaining({ messageId: 'preview-message-other', targetTabId: 'opened-chat-tab' })
       )
     })
     expect(mocks.eventEmit).not.toHaveBeenCalledWith(
@@ -1596,6 +1799,7 @@ describe('GlobalSearchPanel', () => {
 
   it('opens a session message preview before routing to the agent message', async () => {
     const user = userEvent.setup()
+    mocks.recentItems = []
     mocks.sessionMessageQueryResult = {
       items: [
         {
@@ -1613,10 +1817,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     expect(await screen.findByText('Assistant role')).toBeInTheDocument()
     await user.click(await screen.findByRole('option', { name: /needle session reply/ }))
@@ -1629,30 +1830,29 @@ describe('GlobalSearchPanel', () => {
     await user.click(screen.getByRole('button', { name: 'Open preview target' }))
 
     await waitFor(() => {
-      expect(mocks.dataApiGet).toHaveBeenCalledWith('/agent-sessions/session-1')
       expect(mocks.invalidateCache).toHaveBeenCalledWith([
         '/agent-sessions',
         '/agent-sessions/session-1',
         '/agent-sessions/session-1/messages'
       ])
-      expect(mocks.openTab).toHaveBeenCalledWith('/app/agents', {
-        forceNew: true,
-        metadata: { instanceAppId: 'agents', instanceKey: 'session-1' }
-      })
+      expect(mocks.openTab).toHaveBeenCalledWith('/app/agents?sessionId=session-1', { forceNew: true })
       expect(mocks.eventEmit).toHaveBeenCalledWith('GLOBAL_SEARCH_SELECT_AGENT_SESSION_MESSAGE', {
         sessionId: 'session-1',
-        messageId: 'session-message-1'
+        messageId: 'session-message-1',
+        targetTabId: 'opened-agent-tab'
       })
     })
-    expect(mocks.dataApiGet.mock.invocationCallOrder[0]).toBeLessThan(mocks.invalidateCache.mock.invocationCallOrder[0])
+    expect(mocks.dataApiGet).not.toHaveBeenCalled()
+    expect(mocks.invalidateCache).toHaveBeenCalledTimes(1)
     expect(mocks.invalidateCache.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.eventEmit.mock.invocationCallOrder.at(-1) ?? Number.MAX_SAFE_INTEGER
+      mocks.openTab.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
     )
     expect(mocks.onClose).toHaveBeenCalledTimes(1)
   })
 
   it('jumps directly from a session message search row action', async () => {
     const user = userEvent.setup()
+    mocks.recentItems = []
     mocks.sessionMessageQueryResult = {
       items: [
         {
@@ -1670,10 +1870,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     const messageOption = await screen.findByRole('option', { name: /needle session reply/ })
     fireEvent.mouseEnter(messageOption)
@@ -1681,31 +1878,28 @@ describe('GlobalSearchPanel', () => {
 
     expect(screen.queryByRole('complementary', { name: 'Message preview' })).not.toBeInTheDocument()
     await waitFor(() => {
-      expect(mocks.dataApiGet).toHaveBeenCalledWith('/agent-sessions/session-1')
       expect(mocks.invalidateCache).toHaveBeenCalledWith([
         '/agent-sessions',
         '/agent-sessions/session-1',
         '/agent-sessions/session-1/messages'
       ])
-      expect(mocks.openTab).toHaveBeenCalledWith('/app/agents', {
-        forceNew: true,
-        metadata: { instanceAppId: 'agents', instanceKey: 'session-1' }
-      })
+      expect(mocks.openTab).toHaveBeenCalledWith('/app/agents?sessionId=session-1', { forceNew: true })
       expect(mocks.eventEmit).toHaveBeenCalledWith('GLOBAL_SEARCH_SELECT_AGENT_SESSION_MESSAGE', {
         sessionId: 'session-1',
-        messageId: 'session-message-1'
+        messageId: 'session-message-1',
+        targetTabId: 'opened-agent-tab'
       })
     })
+    expect(mocks.dataApiGet).not.toHaveBeenCalled()
+    expect(mocks.invalidateCache).toHaveBeenCalledTimes(1)
     expect(mocks.onClose).toHaveBeenCalledTimes(1)
   })
 
   it('logs and toasts when opening a message result fails', async () => {
     const user = userEvent.setup()
     const openError = new Error('missing session')
-    // The mount-time recent-title refresh fires once before the click action.
-    // Drain its expected stub first so the click rejection lands on the right call.
-    mocks.dataApiGet.mockResolvedValueOnce({ name: 'Topic recent' } as never)
-    mocks.dataApiGet.mockRejectedValueOnce(openError)
+    mocks.recentItems = []
+    mocks.invalidateCache.mockRejectedValueOnce(openError)
     mocks.sessionMessageQueryResult = {
       items: [
         {
@@ -1723,10 +1917,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     const messageOption = await screen.findByRole('option', { name: /needle session reply/ })
     fireEvent.mouseEnter(messageOption)
@@ -1738,7 +1929,7 @@ describe('GlobalSearchPanel', () => {
         sessionId: 'session-1',
         messageId: 'session-message-1'
       })
-      expect(mocks.toastError).toHaveBeenCalledWith('Failed to open search result')
+      expect(toast.error).toHaveBeenCalledWith('Failed to open search result')
     })
     expect(mocks.onClose).not.toHaveBeenCalled()
   })
@@ -1759,10 +1950,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'needle'
-    )
+    await typeSearchQuery(user, 'needle')
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     await user.click(await screen.findByRole('option', { name: /needle session reply/ }))
 
@@ -1794,8 +1982,10 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    const input = screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...')
+    const input = screen.getByLabelText(SEARCH_INPUT_LABEL)
     await user.type(input, 'needle')
+    // Query-gated controls mount only after the input debounce commits.
+    await screen.findByRole('radio', { name: 'Messages' })
     await user.click(screen.getByRole('radio', { name: 'Messages' }))
     await screen.findByRole('option', { name: /needle session reply/ })
     await user.click(input)
@@ -1809,7 +1999,8 @@ describe('GlobalSearchPanel', () => {
     await waitFor(() => {
       expect(mocks.eventEmit).toHaveBeenCalledWith('GLOBAL_SEARCH_SELECT_AGENT_SESSION_MESSAGE', {
         sessionId: 'session-1',
-        messageId: 'session-message-1'
+        messageId: 'session-message-1',
+        targetTabId: 'opened-agent-tab'
       })
     })
     expect(mocks.onClose).toHaveBeenCalledTimes(1)
@@ -1820,7 +2011,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'), 'plan')
+    await typeSearchQuery(user, 'plan')
     await user.click(screen.getByRole('button', { name: 'Updated time: Any time' }))
     expect(screen.getByRole('menuitemradio', { name: 'Last 7 days' }).parentElement?.parentElement).toHaveClass(
       'z-[90]'
@@ -1869,10 +2060,7 @@ describe('GlobalSearchPanel', () => {
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
-    await user.type(
-      screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...'),
-      'assistant'
-    )
+    await typeSearchQuery(user, 'assistant')
 
     const highlights = await screen.findAllByText('Assistant', { selector: 'mark' })
     expect(highlights).toHaveLength(2)
@@ -1945,6 +2133,387 @@ describe('GlobalSearchPanel', () => {
     expect(mocks.onClose).not.toHaveBeenCalled()
   })
 
+  it('does not open the active result when Enter lands during the debounce window', async () => {
+    const user = userEvent.setup()
+    mocks.queryResult = {
+      query: 'assistant',
+      groups: [
+        {
+          type: 'assistant',
+          items: [
+            {
+              type: 'assistant',
+              id: 'assistant-1',
+              title: 'Writing Assistant',
+              target: { assistantId: 'assistant-1' }
+            }
+          ]
+        }
+      ]
+    }
+
+    render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    const input = screen.getByLabelText('Search conversations, tasks, assistants, agents, and knowledge...')
+    await user.type(input, 'assistant')
+    await screen.findByRole('option', { name: /Writing Assistant/ })
+
+    // Typing again leaves the rendered results stale for one debounce window;
+    // Enter inside it must not activate the previous query's active item.
+    fireEvent.change(input, { target: { value: 'assistantx' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(screen.queryByTestId('resource-edit-dialog-host')).not.toBeInTheDocument()
+    expect(mocks.openTab).not.toHaveBeenCalled()
+    expect(mocks.onClose).not.toHaveBeenCalled()
+
+    // Once the committed query catches up with the input, Enter works again.
+    await waitFor(() => {
+      expect(mocks.useQuery).toHaveBeenLastCalledWith(
+        '/search/entities',
+        expect.objectContaining({
+          enabled: true,
+          query: expect.objectContaining({ q: 'assistantx' })
+        })
+      )
+    })
+    await user.keyboard('{Enter}')
+
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-kind', 'assistant')
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-id', 'assistant-1')
+  })
+
+  it('does not open the active result when Enter lands during the deferred handoff', async () => {
+    const user = userEvent.setup()
+    mocks.queryResult = {
+      query: 'assistant',
+      groups: [
+        {
+          type: 'assistant',
+          items: [
+            {
+              type: 'assistant',
+              id: 'assistant-1',
+              title: 'Writing Assistant',
+              target: { assistantId: 'assistant-1' }
+            }
+          ]
+        }
+      ]
+    }
+
+    const view = render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    const input = screen.getByLabelText(SEARCH_INPUT_LABEL)
+    await user.type(input, 'assistant')
+    await screen.findByRole('option', { name: /Writing Assistant/ })
+
+    // Pin the deferred lane on the previous query: the debounce commit below
+    // propagates to `debouncedQuery`, but the rendered list (and its active
+    // item) still belongs to 'assistant' — the frame React produces before
+    // the deferred re-render lands.
+    mocks.holdDeferredValue = true
+    fireEvent.change(input, { target: { value: 'assistantx' } })
+
+    // Let the debounce window elapse so the committed query catches up with
+    // the input while the deferred value stays pinned behind.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, GLOBAL_SEARCH_QUERY_DEBOUNCE_MS + 50))
+    })
+    expect(mocks.useQuery).not.toHaveBeenCalledWith(
+      '/search/entities',
+      expect.objectContaining({ query: expect.objectContaining({ q: 'assistantx' }) })
+    )
+
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(screen.queryByTestId('resource-edit-dialog-host')).not.toBeInTheDocument()
+    expect(mocks.openTab).not.toHaveBeenCalled()
+    expect(mocks.onClose).not.toHaveBeenCalled()
+
+    // Release the deferred lane; once the rendered query catches up with the
+    // input, Enter activates the result again.
+    mocks.holdDeferredValue = false
+    view.rerender(<GlobalSearchPanel onClose={mocks.onClose} />)
+    await waitFor(() => {
+      expect(mocks.useQuery).toHaveBeenLastCalledWith(
+        '/search/entities',
+        expect.objectContaining({
+          enabled: true,
+          query: expect.objectContaining({ q: 'assistantx' })
+        })
+      )
+    })
+    await user.keyboard('{Enter}')
+
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-kind', 'assistant')
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-id', 'assistant-1')
+  })
+
+  it('does not open the active result when the input DOM value runs ahead of the committed query', async () => {
+    const user = userEvent.setup()
+    mocks.queryResult = {
+      query: 'assistant',
+      groups: [
+        {
+          type: 'assistant',
+          items: [
+            {
+              type: 'assistant',
+              id: 'assistant-1',
+              title: 'Writing Assistant',
+              target: { assistantId: 'assistant-1' }
+            }
+          ]
+        }
+      ]
+    }
+
+    render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    const input = screen.getByLabelText(SEARCH_INPUT_LABEL)
+    await user.type(input, 'assistant')
+    await screen.findByRole('option', { name: /Writing Assistant/ })
+
+    // The engine can write the next query into the input before React
+    // processes the matching change event (the compositionend-before-change
+    // ordering is the common trigger). The guard must read the input's
+    // actual DOM value — not the lagging `query` state — so Enter is
+    // swallowed while the committed query still drives the rendered list.
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+    setValue?.call(input, 'assistantx')
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(screen.queryByTestId('resource-edit-dialog-host')).not.toBeInTheDocument()
+    expect(mocks.openTab).not.toHaveBeenCalled()
+    expect(mocks.onClose).not.toHaveBeenCalled()
+
+    // Once the change event lands and the committed query catches up, Enter
+    // activates the result again.
+    fireEvent.change(input, { target: { value: 'assistantx' } })
+    await waitFor(() => {
+      expect(mocks.useQuery).toHaveBeenLastCalledWith(
+        '/search/entities',
+        expect.objectContaining({
+          enabled: true,
+          query: expect.objectContaining({ q: 'assistantx' })
+        })
+      )
+    })
+    await user.keyboard('{Enter}')
+
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-kind', 'assistant')
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-id', 'assistant-1')
+  })
+
+  it('swallows Enter while the aligned query fetch is in flight and activates once the response lands', async () => {
+    const user = userEvent.setup()
+    mocks.queryResult = {
+      query: 'assistant',
+      groups: [
+        {
+          type: 'assistant',
+          items: [
+            {
+              type: 'assistant',
+              id: 'assistant-1',
+              title: 'Writing Assistant',
+              target: { assistantId: 'assistant-1' }
+            }
+          ]
+        }
+      ]
+    }
+
+    const view = render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    const input = screen.getByLabelText(SEARCH_INPUT_LABEL)
+    await user.type(input, 'assistant')
+    await screen.findByRole('option', { name: /Writing Assistant/ })
+
+    // Extend the query: the debounce commits, the deferred lane catches up, and
+    // the entities fetch for 'assistantx' starts — while the rendered results
+    // still belong to 'assistant' (keepPreviousData). Enter must be swallowed.
+    mocks.entitiesSearchRefreshing = true
+    await user.type(input, 'x')
+    await waitFor(() => {
+      expect(mocks.useQuery).toHaveBeenLastCalledWith(
+        '/search/entities',
+        expect.objectContaining({
+          enabled: true,
+          query: expect.objectContaining({ q: 'assistantx' })
+        })
+      )
+    })
+    await user.keyboard('{Enter}')
+
+    expect(screen.queryByTestId('resource-edit-dialog-host')).not.toBeInTheDocument()
+    expect(mocks.openTab).not.toHaveBeenCalled()
+    expect(mocks.onClose).not.toHaveBeenCalled()
+
+    // The response for 'assistantx' lands: Enter activates the fresh result.
+    mocks.entitiesSearchRefreshing = false
+    mocks.queryResult = {
+      query: 'assistantx',
+      groups: [
+        {
+          type: 'assistant',
+          items: [
+            {
+              type: 'assistant',
+              id: 'assistant-2',
+              title: 'Refined Assistant',
+              target: { assistantId: 'assistant-2' }
+            }
+          ]
+        }
+      ]
+    }
+    view.rerender(<GlobalSearchPanel onClose={mocks.onClose} />)
+    await screen.findByRole('option', { name: /Refined Assistant/ })
+    await user.keyboard('{Enter}')
+
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-kind', 'assistant')
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-id', 'assistant-2')
+  })
+
+  it('swallows Enter after the aligned query fetch fails and activates once a response lands', async () => {
+    const user = userEvent.setup()
+    mocks.queryResult = {
+      query: 'assistant',
+      groups: [
+        {
+          type: 'assistant',
+          items: [
+            {
+              type: 'assistant',
+              id: 'assistant-1',
+              title: 'Writing Assistant',
+              target: { assistantId: 'assistant-1' }
+            }
+          ]
+        }
+      ]
+    }
+
+    const view = render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    const input = screen.getByLabelText(SEARCH_INPUT_LABEL)
+    await user.type(input, 'assistant')
+    await screen.findByRole('option', { name: /Writing Assistant/ })
+
+    // Extend the query: the aligned fetch for 'assistantx' fails terminally —
+    // isRefreshing has settled and the queries align, but keepPreviousData
+    // still renders the 'assistant' results. Enter must be swallowed.
+    mocks.entitiesSearchError = new Error('network unavailable')
+    await user.type(input, 'x')
+    await waitFor(() => {
+      expect(mocks.useQuery).toHaveBeenLastCalledWith(
+        '/search/entities',
+        expect.objectContaining({
+          enabled: true,
+          query: expect.objectContaining({ q: 'assistantx' })
+        })
+      )
+    })
+    await user.keyboard('{Enter}')
+
+    expect(screen.queryByTestId('resource-edit-dialog-host')).not.toBeInTheDocument()
+    expect(mocks.openTab).not.toHaveBeenCalled()
+    expect(mocks.onClose).not.toHaveBeenCalled()
+
+    // A later attempt succeeds: Enter activates the fresh result.
+    mocks.entitiesSearchError = undefined
+    mocks.queryResult = {
+      query: 'assistantx',
+      groups: [
+        {
+          type: 'assistant',
+          items: [
+            {
+              type: 'assistant',
+              id: 'assistant-2',
+              title: 'Refined Assistant',
+              target: { assistantId: 'assistant-2' }
+            }
+          ]
+        }
+      ]
+    }
+    view.rerender(<GlobalSearchPanel onClose={mocks.onClose} />)
+    await screen.findByRole('option', { name: /Refined Assistant/ })
+    await user.keyboard('{Enter}')
+
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-kind', 'assistant')
+    expect(screen.getByTestId('resource-edit-dialog-host')).toHaveAttribute('data-id', 'assistant-2')
+  })
+
+  it('swallows Enter while the message search shows its error state', async () => {
+    const user = userEvent.setup()
+    mocks.messageQueryResult = {
+      items: [
+        {
+          messageId: 'message-1',
+          topicId: 'topic-1',
+          topicName: 'Topic A',
+          topicCreatedAt: '2026-01-01T00:00:00.000Z',
+          topicUpdatedAt: '2026-01-01T00:00:00.000Z',
+          role: 'user' as const,
+          snippet: 'needle message one',
+          createdAt: '2026-01-01T00:00:00.000Z'
+        }
+      ],
+      nextCursor: 'cursor-2'
+    }
+
+    const view = render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    const input = screen.getByLabelText(SEARCH_INPUT_LABEL)
+    await user.type(input, 'needle')
+    await screen.findByRole('radio', { name: 'Messages' })
+    await user.click(screen.getByRole('radio', { name: 'Messages' }))
+    await screen.findByRole('option', { name: /needle message one/ })
+    await user.click(input)
+
+    // The load-more page fails terminally: the panel renders the error state and
+    // hides the listbox, but the keyboard selection still references the retained
+    // rows. Enter must not open one of them.
+    mocks.messageSearchError = new Error('load-more failed')
+    view.rerender(<GlobalSearchPanel onClose={mocks.onClose} />)
+    await screen.findByText('Search failed')
+    await user.keyboard('{Enter}')
+
+    expect(screen.queryByRole('complementary', { name: 'Message preview' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the confirmed composition text in the input when compositionend precedes the change event', async () => {
+    render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    const input = screen.getByLabelText(SEARCH_INPUT_LABEL) as HTMLInputElement
+    fireEvent.compositionStart(input)
+    fireEvent.change(input, { target: { value: 'ni' } })
+
+    // The engine writes the candidates and emits compositionend before React
+    // processes the matching change event: the controlled value still holds
+    // the intermediate. The panel must adopt the composed text in the same
+    // tick instead of letting a re-render restore the intermediate.
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+    setValue?.call(input, '你好')
+    fireEvent.compositionEnd(input)
+
+    expect(input).toHaveValue('你好')
+
+    await waitFor(() => {
+      expect(mocks.useQuery).toHaveBeenLastCalledWith(
+        '/search/entities',
+        expect.objectContaining({
+          enabled: true,
+          query: expect.objectContaining({ q: '你好' })
+        })
+      )
+    })
+  })
+
   it('opens the active knowledge base result with Enter', async () => {
     const user = userEvent.setup()
     mocks.queryResult = {
@@ -1989,7 +2558,7 @@ describe('GlobalSearchPanel', () => {
         lastAccessTime: 20
       }
     ]
-    mocks.dataApiGet.mockResolvedValueOnce({ name: 'Fresh name from server' } as never)
+    mocks.dataApiGet.mockResolvedValueOnce({ name: 'Fresh name from server' })
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
@@ -2043,7 +2612,7 @@ describe('GlobalSearchPanel', () => {
         lastAccessTime: 20
       }
     ]
-    mocks.dataApiGet.mockResolvedValueOnce({ name: 'Already fresh' } as never)
+    mocks.dataApiGet.mockResolvedValueOnce({ name: 'Already fresh' })
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
@@ -2073,7 +2642,7 @@ describe('GlobalSearchPanel', () => {
         lastAccessTime: 20
       }
     ]
-    mocks.dataApiGet.mockResolvedValueOnce({ name: 'Fresh session name from server' } as never)
+    mocks.dataApiGet.mockResolvedValueOnce({ name: 'Fresh session name from server' })
 
     render(<GlobalSearchPanel onClose={mocks.onClose} />)
 
@@ -2143,6 +2712,43 @@ describe('GlobalSearchPanel', () => {
         lastAccessTime: 20
       }
     ])
+  })
+
+  it('cleans legacy assistant library route recents on open', async () => {
+    const user = userEvent.setup()
+    const settingsRecent = {
+      kind: 'route' as const,
+      url: '/app/settings',
+      title: 'Settings',
+      icon: 'settings',
+      lastAccessTime: 20
+    }
+    mocks.recentItems = [
+      {
+        kind: 'route',
+        url: '/app/library?resourceType=assistant',
+        title: 'Library',
+        icon: 'library',
+        lastAccessTime: 30
+      },
+      settingsRecent
+    ]
+
+    render(<GlobalSearchPanel onClose={mocks.onClose} />)
+
+    expect(screen.queryByRole('option', { name: /Library/ })).not.toBeInTheDocument()
+    const settingsOption = screen.getByRole('option', { name: /Settings/ })
+    await waitFor(() => {
+      expect(mocks.recentItems).toEqual([settingsRecent])
+    })
+
+    await user.click(settingsOption)
+
+    expect(mocks.openTab).toHaveBeenCalledWith('/app/settings', { title: 'Settings', icon: 'settings' })
+    expect(mocks.openTab).not.toHaveBeenCalledWith(
+      '/app/library?resourceType=assistant',
+      expect.objectContaining({ title: 'Library' })
+    )
   })
 
   it('only refreshes up to the display limit items ordered by lastAccessTime', async () => {
@@ -2228,7 +2834,7 @@ describe('GlobalSearchPanel', () => {
         lastAccessTime: 20
       }
     ]
-    mocks.dataApiGet.mockResolvedValueOnce({ name: 'First Refresh' } as never)
+    mocks.dataApiGet.mockResolvedValueOnce({ name: 'First Refresh' })
 
     const { unmount } = render(<GlobalSearchPanel onClose={mocks.onClose} />)
     await waitFor(() => {
@@ -2254,7 +2860,7 @@ describe('GlobalSearchPanel', () => {
         lastAccessTime: 20
       }
     ]
-    mocks.dataApiGet.mockResolvedValue({ name: 'Refreshed Title' } as never)
+    mocks.dataApiGet.mockResolvedValue({ name: 'Refreshed Title' })
 
     const { unmount } = render(<GlobalSearchPanel onClose={mocks.onClose} />)
     await waitFor(() => {

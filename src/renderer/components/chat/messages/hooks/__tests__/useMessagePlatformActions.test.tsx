@@ -1,13 +1,14 @@
-import { COMPOSER_CLIPBOARD_FRAGMENT_MIME } from '@renderer/utils/message/composerClipboard'
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { toast } from '@renderer/services/toast'
+import { COMPOSER_CLIPBOARD_FRAGMENT_MIME } from '@renderer/utils/message/composerClipboard'
 
 import { useMessagePlatformActions } from '../useMessagePlatformActions'
 
 describe('useMessagePlatformActions', () => {
   const write = vi.fn()
   const writeText = vi.fn()
-  const success = vi.fn()
   const createdItems: Array<Record<string, Blob>> = []
 
   beforeEach(() => {
@@ -33,12 +34,6 @@ describe('useMessagePlatformActions', () => {
       configurable: true,
       value: TestClipboardItem
     })
-    ;(window as any).toast = {
-      success,
-      warning: vi.fn(),
-      info: vi.fn(),
-      error: vi.fn()
-    }
   })
 
   it('writes private composer clipboard formats when the browser supports them', async () => {
@@ -66,7 +61,7 @@ describe('useMessagePlatformActions', () => {
         [COMPOSER_CLIPBOARD_FRAGMENT_MIME]: expect.any(Blob)
       })
     )
-    expect(success).toHaveBeenCalledWith('copied')
+    expect(toast.success).toHaveBeenCalledWith('copied')
   })
 
   it('retries rich clipboard writes without custom formats when custom formats fail', async () => {

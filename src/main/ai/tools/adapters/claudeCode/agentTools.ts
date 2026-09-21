@@ -1,7 +1,7 @@
+import { application } from '@application'
 import { mcpServerService } from '@data/services/McpServerService'
 import { loggerService } from '@logger'
 import { type ClaudeToolContext, resolveDisallowedTools } from '@main/ai/tools/adapters/claudeCode/toolConditions'
-import { application } from '@main/core/application'
 import { claudeRegistrySdkDescriptors } from '@shared/ai/claudecode/toolRegistry'
 import {
   buildClaudeMcpToolName,
@@ -15,6 +15,20 @@ import {
 import type { Tool } from '@shared/ai/tool'
 import { resolveMcpSourceToolAccess } from '@shared/ai/tools/mcpSourcePolicy'
 import type { AgentEntity, AgentPermissionMode } from '@shared/data/api/schemas/agents'
+
+function sanitizeDescription(value: string): string {
+  let out = ''
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    if (code === 0x09 || code === 0x0a || code === 0x0d) {
+      out += value[i]
+      continue
+    }
+    if ((code >= 0x00 && code <= 0x1f) || code === 0x7f) continue
+    out += value[i]
+  }
+  return out
+}
 
 const logger = loggerService.withContext('ClaudeCodeAgentTools')
 
@@ -51,9 +65,13 @@ async function listMcpDescriptors(mcpIds: readonly string[]): Promise<{
   const failedMcpIds = new Set<string>()
 
   for (const id of mcpIds) {
+    // `agent.mcps` entries may be a server id or a name (matching buildMcpServers / buildMcpToolMetadata).
+    // A genuinely unknown/deleted server is skipped — not marked failed, so it can't spuriously trigger
+    // the carry-forward of stale descriptors reserved for transient listTools fetch failures below.
+    const server = mcpServerService.findByIdOrName(id)
+    if (!server) continue
     try {
-      const server = await mcpServerService.getById(id)
-      const tools = await application.get('McpCatalogService').listTools(server.id)
+      const tools = application.get('McpCatalogService').listTools(server.id)
 
       for (const tool of tools) {
         const sourceAccess = resolveMcpSourceToolAccess(server, tool)
@@ -61,7 +79,7 @@ async function listMcpDescriptors(mcpIds: readonly string[]): Promise<{
         descriptors.push({
           id: buildClaudeMcpToolName(server.name, tool.name),
           name: tool.name,
-          description: tool.description || '',
+          description: sanitizeDescription(tool.description || ''),
           origin: 'mcp',
           sourceId: server.id,
           sourceName: server.name,
@@ -70,8 +88,11 @@ async function listMcpDescriptors(mcpIds: readonly string[]): Promise<{
         })
       }
     } catch (error) {
-      failedMcpIds.add(id)
-      logger.warn('Failed to list MCP tools for agent catalog', { id, error })
+      // Key by the resolved server.id, not the raw entry: the carry-forward in rebuild() matches
+      // failedMcpIds against prior descriptors' sourceId (server.id), so a name-referenced entry keyed
+      // by its name would lose its approvals on a transient failure instead of preserving them.
+      failedMcpIds.add(server.id)
+      logger.warn('Failed to list MCP tools for agent catalog', { id, serverId: server.id, error })
     }
   }
 
@@ -117,6 +138,17 @@ function injectedRuntimeTool(runtimeName: string): Tool {
   }
 }
 
+// An injected runtime tool that matches an auto-allow prefix but must still prompt — used for
+// mutating cherry-tools (e.g. kb_manage) so a destructive call goes through per-call user approval.
+function injectedRuntimeToolRequiringApproval(runtimeName: string): Tool {
+  return {
+    id: runtimeName,
+    name: runtimeName,
+    origin: 'internal',
+    approval: 'prompt'
+  }
+}
+
 export interface ClaudeAgentToolPolicySnapshot {
   resolve(runtimeName: string, input?: unknown): Tool | undefined
   isDisabled(runtimeName: string): boolean
@@ -127,7 +159,14 @@ export interface ClaudeAgentToolPolicySnapshot {
 
 export async function createClaudeAgentToolPolicySnapshot(
   agent: AgentEntity,
-  options: { autoAllowRuntimeNamePrefixes?: readonly string[]; conditionContext?: ClaudeToolContext } = {}
+  options: {
+    autoAllowRuntimeNames?: readonly string[]
+    autoAllowRuntimeNamePrefixes?: readonly string[]
+    // Runtime names that match an auto-allow list/prefix but must still require per-call approval
+    // (e.g. mutating cherry-tools like kb_manage). Checked against the full runtime name.
+    autoAllowRuntimeNameExceptions?: readonly string[]
+    conditionContext?: ClaudeToolContext
+  } = {}
 ): Promise<ClaudeAgentToolPolicySnapshot> {
   let descriptors: ClaudeToolDescriptor[] = []
   let policy: ClaudeToolPolicy = {}
@@ -166,7 +205,13 @@ export async function createClaudeAgentToolPolicySnapshot(
 
   return {
     resolve(runtimeName, input) {
-      if (options.autoAllowRuntimeNamePrefixes?.some((prefix) => runtimeName.startsWith(prefix))) {
+      if (options.autoAllowRuntimeNameExceptions?.includes(runtimeName)) {
+        return injectedRuntimeToolRequiringApproval(runtimeName)
+      }
+      if (
+        options.autoAllowRuntimeNames?.includes(runtimeName) ||
+        options.autoAllowRuntimeNamePrefixes?.some((prefix) => runtimeName.startsWith(prefix))
+      ) {
         return injectedRuntimeTool(runtimeName)
       }
       const descriptor = findRuntimeDescriptor(descriptors, runtimeName)

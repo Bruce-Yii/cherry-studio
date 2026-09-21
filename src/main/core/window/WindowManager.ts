@@ -1,5 +1,8 @@
 import { join } from 'node:path'
 
+import { app, BrowserWindow, screen } from 'electron'
+import { v4 as uuidv4 } from 'uuid'
+
 import { application } from '@application'
 import { loggerService } from '@logger'
 import { DIAGNOSTICS_ENABLED } from '@main/core/diagnostics'
@@ -30,8 +33,6 @@ import {
 import { clearSavedBounds, injectSavedBounds, peekSavedState, persistNow } from '@main/core/window/windowBoundsTracker'
 import { getWindowTypeMetadata, mergeWindowOptions, WINDOW_TYPE_REGISTRY } from '@main/core/window/windowRegistry'
 import type { WindowBoundsState } from '@shared/data/cache/cacheValueTypes'
-import { app, BrowserWindow, screen, shell } from 'electron'
-import { v4 as uuidv4 } from 'uuid'
 
 const logger = loggerService.withContext('WindowManager')
 
@@ -591,6 +592,11 @@ export class WindowManager extends BaseService {
     }
   }
 
+  /** Get a window's registered type by ID (O(1) lookup; undefined if unknown/closed). */
+  public getWindowType(windowId: string): WindowType | undefined {
+    return this.windows.get(windowId)?.type
+  }
+
   /** Get all live BrowserWindow instances of a specific type (skips destroyed) */
   public getWindowsByType(type: WindowType): BrowserWindow[] {
     const windowIds = this.windowsByType.get(type)
@@ -640,12 +646,17 @@ export class WindowManager extends BaseService {
 
   /**
    * Broadcast an IPC message to all managed windows.
-   * Skips destroyed windows automatically.
+   * Skips destroyed windows automatically. Send failures are isolated per
+   * window — one window's `send()` throwing must not abort delivery to the
+   * remaining windows.
    */
   public broadcast(channel: string, ...args: unknown[]): void {
-    for (const managed of this.windows.values()) {
-      if (!managed.window.isDestroyed()) {
+    for (const [id, managed] of this.windows) {
+      if (managed.window.isDestroyed()) continue
+      try {
         managed.window.webContents.send(channel, ...args)
+      } catch (error) {
+        logger.warn(`broadcast to window '${id}' failed on channel '${channel}'`, error as Error)
       }
     }
   }
@@ -674,6 +685,10 @@ export class WindowManager extends BaseService {
   /** Retrieve initialization data for a window */
   public getInitData(windowId: string): unknown | null {
     return this.initDataStore.get(windowId) ?? null
+  }
+
+  public clearInitData(windowId: string): void {
+    this.initDataStore.delete(windowId)
   }
 
   /**
@@ -1333,7 +1348,7 @@ export class WindowManager extends BaseService {
     // Resolve preload path. `metadata.preload` mirrors `htmlPath`'s three-state
     // encoding: omitted → default file, non-empty string → that file, empty
     // string → no preload (for nodeIntegration:true cases).
-    const preloadName = metadata.preload ?? 'index.js'
+    const preloadName = metadata.preload ?? 'preload.js'
     const preloadPath = preloadName ? join(__dirname, '../preload/', preloadName) : undefined
 
     // 1. Create BrowserWindow
@@ -1346,22 +1361,31 @@ export class WindowManager extends BaseService {
       }
     })
 
-    // Intercept external links: open in system browser
-    window.webContents.setWindowOpenHandler(({ url }) => {
-      if (url.startsWith('http:') || url.startsWith('https:')) {
-        void shell.openExternal(url)
-      }
-      return { action: 'deny' }
-    })
+    // Domain services may route denied popups after onWindowCreated.
+    window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
     window.webContents.on('will-navigate', (event, url) => {
       if (url.startsWith('http:') || url.startsWith('https:')) {
         const currentURL = window.webContents.getURL()
         if (currentURL && new URL(url).origin !== new URL(currentURL).origin) {
           event.preventDefault()
-          void shell.openExternal(url)
         }
+      } else {
+        // Non-web schemes (file:, custom protocols) have no legitimate in-window
+        // navigation path; deny like the window-open handler denies non-http(s) popups.
+        event.preventDefault()
+        logger.warn(`Blocked navigation to untrusted URL scheme: ${url}`)
       }
+    })
+
+    // A script-less sandboxed subframe still follows <a href>: deny (fail-closed) unless the
+    // app's own main frame initiated it (by frameTreeNodeId — wrapper identity isn't stable).
+    window.webContents.on('will-frame-navigate', (event) => {
+      if (event.isMainFrame) return
+      const initiatorId = event.initiator?.frameTreeNodeId
+      if (initiatorId !== undefined && initiatorId === window.webContents.mainFrame.frameTreeNodeId) return
+      event.preventDefault()
+      logger.warn(`Blocked subframe navigation to: ${event.url}`)
     })
 
     // 2. Setup event listeners
@@ -1413,7 +1437,9 @@ export class WindowManager extends BaseService {
     // wrappers then transparently apply around any subsequent hide()/show()/close().
     // Also runs AFTER applyWindowBehavior so the behavior layer's initial setter
     // calls do not trigger the monkey-patched show/showInactive.
-    applyWindowQuirks(managedWindow.window, managedWindow.metadata.quirks, managedWindow.metadata.behavior)
+    applyWindowQuirks(managedWindow.window, managedWindow.metadata.quirks, managedWindow.metadata.behavior, () =>
+      this.behavior.getAlwaysOnTopLevelOverride(windowId)
+    )
 
     // 4c. Persist bounds on native close for singletons (GUI quit and
     // hide-to-tray, where the window is still alive). Attached to every singleton
@@ -1565,8 +1591,8 @@ export class WindowManager extends BaseService {
     //   treat FullscreenChanged as the source of truth (the green button defaults
     //   to native fullscreen, which fires reliably).
     // - HTML5 element.requestFullscreen() and macOS setSimpleFullScreen() are
-    //   intentionally NOT bridged here: useFullscreen / useFullScreenNotice
-    //   semantics is OS-level native fullscreen only.
+    //   intentionally NOT bridged here: the renderer's fullscreen handling
+    //   (useWindowRuntime) is OS-level native fullscreen only.
     window.on('maximize', () => {
       application.get('IpcApiService').send(windowId, 'window.maximized_changed', true)
     })

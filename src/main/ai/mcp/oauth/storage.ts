@@ -1,11 +1,13 @@
-import { loggerService } from '@logger'
+import fs from 'fs/promises'
+import path from 'path'
+
 import type {
   OAuthClientInformation,
   OAuthClientInformationMixed,
   OAuthTokens
 } from '@modelcontextprotocol/sdk/shared/auth.js'
-import fs from 'fs/promises'
-import path from 'path'
+
+import { loggerService } from '@logger'
 
 import type { IOAuthStorage, OAuthStorageData } from './types'
 import { OAuthStorageSchema } from './types'
@@ -109,13 +111,26 @@ export class JsonFileStorage implements IOAuthStorage {
     })
   }
 
+  async getAuthServerUrl(): Promise<string | undefined> {
+    const data = await this.readStorage()
+    return data.authServerUrl
+  }
+
+  async saveAuthServerUrl(url: string | undefined): Promise<void> {
+    const data = await this.readStorage()
+    await this.writeStorage({
+      ...data,
+      authServerUrl: url
+    })
+  }
+
   async clear(): Promise<void> {
     try {
       await fs.unlink(this.filePath)
       this.cache = null
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code !== 'ENOENT') {
-        logger.error('Error clearing OAuth storage:', error as Error)
+        logger.error('Error clearing OAuth storage:', error)
         throw new Error(`Failed to clear OAuth storage: ${error instanceof Error ? error.message : String(error)}`)
       }
     }

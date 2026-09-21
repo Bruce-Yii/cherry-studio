@@ -1,6 +1,7 @@
-import type { MessageData, MessageStats, ModelSnapshot } from '@shared/data/types/message'
-import { sql } from 'drizzle-orm'
+import { asc, desc, sql } from 'drizzle-orm'
 import { check, foreignKey, index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+
+import type { MessageData, MessageSnapshot, MessageStats } from '@shared/data/types/message'
 
 import { createUpdateDeleteTimestamps, uuidPrimaryKeyOrdered } from './_columnHelpers'
 import { topicTable } from './topic'
@@ -38,9 +39,13 @@ export const messageTable = sqliteTable(
     // Model identifier: FK to user_model(id) — UniqueModelId "providerId::modelId"
     modelId: text().references(() => userModelTable.id, { onDelete: 'set null' }),
     // Snapshot of model at message creation time
-    modelSnapshot: text({ mode: 'json' }).$type<ModelSnapshot>(),
+    messageSnapshot: text({ mode: 'json' }).$type<MessageSnapshot>(),
     // Statistics: token usage, performance metrics, etc.
     stats: text({ mode: 'json' }).$type<MessageStats>(),
+    // Durable compaction marker: a rolling summary covering the conversation up to
+    // AND INCLUDING this row. null until this row becomes a compaction boundary.
+    // Read-time only — never fed to the model as a tree node (see compaction.ts).
+    compactionSummary: text(),
 
     // Stable integer surrogate for the FTS5 content_rowid. Local-only physical identity
     // (like rowid): assigned by the AFTER INSERT trigger, never set by app code, never
@@ -56,9 +61,14 @@ export const messageTable = sqliteTable(
     // Indexes
     index('message_parent_id_idx').on(t.parentId),
     index('message_topic_created_idx').on(t.topicId, t.createdAt),
+    index('message_created_at_id_idx').on(desc(t.createdAt), asc(t.id)),
     // Backs findPendingAssistantMessageIds (boot reconcile); without it that lookup full-SCANs.
     // Plain, not partial — Drizzle binds `status = ?`, which SQLite can't match to a partial index.
     index('message_status_idx').on(t.status),
+    // Backs the model_id FK's ON DELETE SET NULL. SQLite scans the whole child table once per
+    // deleted parent row when the child key is unindexed, so "remove all models" (hundreds of
+    // rows) would otherwise block the main process for seconds on a large history.
+    index('message_model_id_idx').on(t.modelId),
     // Single-root invariant: at most one live virtual-root (parentId IS NULL) row per topic.
     // Guarantees one root and backs O(1) root lookup (WHERE topic_id=? AND parent_id IS NULL).
     // Scoped to deleted_at IS NULL so a future soft-delete of a root can't collide with a
@@ -101,7 +111,7 @@ export type InsertMessageRow = typeof messageTable.$inferInsert
 
 /**
  * Custom SQL statements that Drizzle cannot manage
- * These are executed after every migration via DbService.runCustomMigrations()
+ * These are executed after every migration via applyMigrations()
  *
  * All statements should be idempotent (IF NOT EXISTS / DROP IF EXISTS / rebuild-safe).
  */

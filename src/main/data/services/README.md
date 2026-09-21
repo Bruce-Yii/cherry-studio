@@ -15,7 +15,7 @@ Business-logic layer for DataApi: one service per domain, each a **direct-import
 | Concurrent writes / `SQLITE_BUSY` | [Write Serialization](../../../../docs/references/data/database-patterns.md#write-serialization-dbservicewithwritetx) |
 | Row → Entity mapping, NULL handling | [Row → Entity Mapping](../../../../docs/references/data/data-api-in-main.md#row--entity-mapping) · [`utils/`](./utils/README.md) |
 | `order_key` / reorder / FTS helpers | [`utils/`](./utils/README.md) |
-| Naming (files, `Tx` suffix, singular/plural) | [Naming Conventions](../../../../docs/references/naming-conventions.md) |
+| Naming (files, `Tx` suffix, singular/plural) | [Naming Conventions](../../../../docs/references/architecture/naming-conventions.md) |
 | Testing a service against a real DB | [Database Testing](../../../../docs/references/testing/database-testing.md) |
 | Is this data at all? (DataApi boundary) | [DataApi Scope & Boundaries](../../../../docs/references/data/api-design-guidelines.md#dataapi-scope--boundaries) |
 
@@ -24,5 +24,5 @@ Business-logic layer for DataApi: one service per domain, each a **direct-import
 - **Singleton, not lifecycle** — `export const xxxService = new XxxService()`; no `getInstance()`, no `new` at call sites.
 - **Own your table** — writes to a table you don't own go through the owner's method (pass `tx`); cross-service reads may inline a JOIN.
 - **Cross-service cycles** — **only** the services in a real cycle join the registry: they self-register *and* resolve the sibling via `getDataService('X')`. Every other service stays a plain singleton; **never** `await import` to break a cycle.
-- **Transactions** — concurrent write paths use `application.get('DbService').withWriteTx(...)`, not `db.transaction(...)`.
+- **Transactions** — wrap multi-statement / read-then-write mutations in a transaction for atomicity; `application.get('DbService').withWriteTx(...)` is the conventional wrapper (a direct `db.transaction(...)` is equivalent under the single synchronous connection). A single autocommit write needs neither.
 - **Paths & logging** — `application.getPath(...)` and `loggerService.withContext(...)`; never ad-hoc.

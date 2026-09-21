@@ -6,11 +6,6 @@ vi.mock('@logger', () => ({
   }
 }))
 
-// Mock registerAdapterFactory to capture the factory function
-vi.mock('../../ChannelManager', () => ({
-  registerAdapterFactory: vi.fn()
-}))
-
 const mockBot = {
   use: vi.fn(),
   command: vi.fn(),
@@ -18,27 +13,32 @@ const mockBot = {
   api: {
     setMyCommands: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn().mockResolvedValue(undefined),
-    sendChatAction: vi.fn().mockResolvedValue(undefined)
+    sendChatAction: vi.fn().mockResolvedValue(undefined),
+    sendDocument: vi.fn().mockResolvedValue(undefined)
   },
   catch: vi.fn(),
   start: vi.fn().mockResolvedValue(undefined),
   stop: vi.fn().mockResolvedValue(undefined)
 }
 
-vi.mock('grammy', () => ({
-  Bot: vi.fn().mockImplementation(() => mockBot)
-}))
+vi.mock('grammy', () => {
+  class MockInputFile {
+    constructor(
+      readonly data: Buffer,
+      readonly filename: string
+    ) {}
+  }
+  return {
+    Bot: vi.fn().mockImplementation(function BotMock() {
+      return mockBot
+    }),
+    InputFile: MockInputFile
+  }
+})
 
-// Import the module to trigger self-registration side effect
-import '../telegram/TelegramAdapter'
+import { InputFile } from 'grammy'
 
-import { registerAdapterFactory } from '../../ChannelManager'
-
-function getFactory() {
-  const call = vi.mocked(registerAdapterFactory).mock.calls[0]
-  if (!call) throw new Error('registerAdapterFactory was not called')
-  return call[1] as (channel: any, agentId: string) => any
-}
+import { createTelegramAdapter } from '../telegram/TelegramAdapter'
 
 describe('TelegramAdapter', () => {
   beforeEach(() => {
@@ -49,6 +49,7 @@ describe('TelegramAdapter', () => {
     mockBot.api.setMyCommands.mockClear().mockResolvedValue(undefined)
     mockBot.api.sendMessage.mockClear().mockResolvedValue(undefined)
     mockBot.api.sendChatAction.mockClear().mockResolvedValue(undefined)
+    mockBot.api.sendDocument.mockClear().mockResolvedValue(undefined)
     mockBot.catch.mockClear()
     mockBot.start.mockClear().mockResolvedValue(undefined)
     mockBot.stop.mockClear().mockResolvedValue(undefined)
@@ -58,20 +59,16 @@ describe('TelegramAdapter', () => {
     vi.useRealTimers()
   })
 
-  function createAdapter(overrides: Record<string, unknown> = {}) {
-    const factory = getFactory()
-    return factory(
-      {
-        id: (overrides.channelId as string) ?? 'ch-1',
-        type: 'telegram',
-        enabled: true,
-        config: {
-          bot_token: (overrides.bot_token as string) ?? 'test-token',
-          allowed_chat_ids: (overrides.allowed_chat_ids as string[]) ?? ['123']
-        }
-      },
-      (overrides.agentId as string) ?? 'agent-1'
-    )
+  function createAdapter(overrides: Record<string, unknown> = {}): any {
+    return createTelegramAdapter({
+      channelId: (overrides.channelId as string) ?? 'ch-1',
+      channelType: 'telegram',
+      agentId: (overrides.agentId as string) ?? 'agent-1',
+      channelConfig: {
+        bot_token: (overrides.bot_token as string) ?? 'test-token',
+        allowed_chat_ids: (overrides.allowed_chat_ids as string[]) ?? ['123']
+      }
+    })
   }
 
   it('connect() registers middleware, commands, message handler, and starts polling', async () => {
@@ -197,6 +194,21 @@ describe('TelegramAdapter', () => {
     // After MarkdownV2 conversion the total length may differ slightly
     const totalSent = mockBot.api.sendMessage.mock.calls[0][1].length + mockBot.api.sendMessage.mock.calls[1][1].length
     expect(totalSent).toBe(5000)
+  })
+
+  it('sendFile() sends a document built from the decoded buffer and filename', async () => {
+    const adapter = createAdapter()
+    await adapter.connect()
+
+    const data = Buffer.from('file-bytes').toString('base64')
+    await adapter.sendFile('123', { filename: 'report.pdf', data, media_type: 'application/pdf', size: 10 })
+
+    expect(mockBot.api.sendDocument).toHaveBeenCalledTimes(1)
+    const [chatId, inputFile] = mockBot.api.sendDocument.mock.calls[0]
+    expect(chatId).toBe('123')
+    expect(inputFile).toBeInstanceOf(InputFile)
+    expect(inputFile.filename).toBe('report.pdf')
+    expect(inputFile.data.toString()).toBe('file-bytes')
   })
 
   it('sendTypingIndicator() sends typing action', async () => {

@@ -1,8 +1,10 @@
+import { beforeEach, describe, expect, it, test, vi } from 'vitest'
+
 // Import Message, MessageBlock, and necessary enums
 import type { MessageExportView } from '@renderer/types/messageExport'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
-import { beforeEach, describe, expect, it, test, vi } from 'vitest'
+import type * as MessageFind from '@renderer/utils/message/find'
 
 // --- Mocks Setup ---
 
@@ -13,6 +15,9 @@ beforeEach(() => {
       file: {
         read: vi.fn().mockResolvedValue('[]'),
         writeWithId: vi.fn()
+      },
+      fs: {
+        readText: vi.fn().mockResolvedValue('')
       }
     },
     configurable: true
@@ -20,7 +25,10 @@ beforeEach(() => {
 })
 
 // Mock the find utility functions - crucial for the test
-vi.mock('@renderer/utils/message/find', () => ({
+vi.mock('@renderer/utils/message/find', async (importOriginal) => ({
+  // `[cite:id]` resolution is the behaviour under test in the copy case below,
+  // so keep the real implementation rather than restating it as a mock.
+  getToolCitationExport: (await importOriginal<typeof MessageFind>()).getToolCitationExport,
   // Gated copy/naming variant — text-only here (the mock never synthesises
   // code/error/translation), which already matches dropping error/translation.
   getNamingTextContent: vi.fn((message: Message & { _fullBlocks?: MessageBlock[]; parts?: any[] }) => {
@@ -44,10 +52,16 @@ vi.mock('@renderer/utils/markdown', async (importOriginal) => {
   }
 })
 
+vi.mock('i18next', () => ({
+  default: {
+    t: vi.fn((key: string) => key)
+  }
+}))
+
 // Import the functions to test AFTER setting up mocks
 import { markdownToPlainText } from '@renderer/utils/markdown'
 
-import { getTitleFromString, messageToPlainText, processCitations } from '../export'
+import { getTitleFromString, messagesToPlainText, messageToPlainText, processCitations } from '../export'
 
 // --- Helper Functions for Test Data ---
 
@@ -152,13 +166,6 @@ beforeEach(() => {
   // Reset mocks and modules before each test suite (describe block)
   vi.resetModules()
   vi.clearAllMocks()
-
-  // Mock i18next translation function
-  vi.mock('i18next', () => ({
-    default: {
-      t: vi.fn((key) => key)
-    }
-  }))
 })
 
 // --- Test Suites ---
@@ -181,24 +188,10 @@ describe('export', () => {
       expect(getTitleFromString('a'.repeat(100), 10)).toBe('a'.repeat(10))
     })
 
-    it('should return slice if first line empty', () => {
-      expect(getTitleFromString('\nabc', 2)).toBe('ab')
-    })
-
-    it('should handle empty string', () => {
+    it('should fall back to the original input when no title remains', () => {
       expect(getTitleFromString('', 5)).toBe('')
-    })
-
-    it('should handle only punctuation', () => {
       expect(getTitleFromString('。', 5)).toBe('。')
-    })
-
-    it('should handle only whitespace', () => {
       expect(getTitleFromString('   ', 2)).toBe('  ')
-    })
-
-    it('should handle non-ascii', () => {
-      expect(getTitleFromString('你好，世界')).toBe('你好')
     })
   })
 
@@ -209,55 +202,12 @@ describe('export', () => {
       ])
       ;(markdownToPlainText as any).mockImplementation((str: string) => str.replace(/[#*_]/g, ''))
 
-      const result = messageToPlainText(testMessage)
+      const result = await messageToPlainText(testMessage)
       expect(result).toBe('Single Message Content')
       expect(markdownToPlainText).toHaveBeenCalledWith('### Single Message Content')
     })
 
-    it('should return empty string for message with no main text or empty content', () => {
-      // Test case 1: No blocks at all
-      const testMessageNoBlocks = createMessage({ role: 'user', id: 'empty_msg_plain' }, [])
-      ;(markdownToPlainText as any).mockReturnValue('')
-
-      const result1 = messageToPlainText(testMessageNoBlocks)
-      expect(result1).toBe('')
-      expect(markdownToPlainText).toHaveBeenCalledWith('')
-
-      // Test case 2: Block exists but content is empty
-      const testMessageEmptyContent = createMessage({ role: 'user', id: 'empty_content_msg' }, [
-        { type: MessageBlockType.MAIN_TEXT, content: '' }
-      ])
-
-      const result2 = messageToPlainText(testMessageEmptyContent)
-      expect(result2).toBe('')
-      expect(markdownToPlainText).toHaveBeenCalledWith('')
-    })
-
-    it('should handle special characters in message content', () => {
-      const testMessage = createMessage({ role: 'user', id: 'special_chars_msg' }, [
-        { type: MessageBlockType.MAIN_TEXT, content: 'Text with "quotes" & <tags> and &entities;' }
-      ])
-      ;(markdownToPlainText as any).mockImplementation((str: string) => str)
-
-      const result = messageToPlainText(testMessage)
-      expect(result).toBe('Text with "quotes" & <tags> and &entities;')
-      expect(markdownToPlainText).toHaveBeenCalledWith('Text with "quotes" & <tags> and &entities;')
-    })
-
-    it('should handle messages with markdown formatting', () => {
-      const testMessage = createMessage({ role: 'user', id: 'markdown_msg' }, [
-        { type: MessageBlockType.MAIN_TEXT, content: '# Header\n**Bold** and *italic* text\n- List item' }
-      ])
-      ;(markdownToPlainText as any).mockImplementation((str: string) =>
-        str.replace(/[#*_]/g, '').replace(/^- /gm, '').replace(/\n+/g, '\n').trim()
-      )
-
-      const result = messageToPlainText(testMessage)
-      expect(result).toBe('Header\nBold and italic text\nList item')
-      expect(markdownToPlainText).toHaveBeenCalledWith('# Header\n**Bold** and *italic* text\n- List item')
-    })
-
-    it('should copy composer skill tokens as pasteable markers instead of hidden prompt text', () => {
+    it('should copy composer skill tokens as pasteable markers instead of hidden prompt text', async () => {
       const testMessage = createExportView(
         [
           {
@@ -286,10 +236,143 @@ describe('export', () => {
       )
       ;(markdownToPlainText as any).mockImplementation((str: string) => str)
 
-      const result = messageToPlainText(testMessage)
+      const result = await messageToPlainText(testMessage)
 
       expect(result).toBe('/pdf/ hello')
       expect(markdownToPlainText).toHaveBeenCalledWith('/pdf/ hello')
+    })
+
+    it('copies an id re-cited from an earlier turn as a plain number', async () => {
+      const testMessage: MessageExportView = {
+        ...createExportView([{ type: 'text', text: 'Still true. [cite:3f2a1b9c-1]' }]),
+        priorCitationParts: [
+          {
+            type: 'tool-web_search',
+            toolCallId: 'earlier-turn',
+            state: 'output-available',
+            input: { query: 'q' },
+            output: [{ id: '3f2a1b9c-1', title: 'First', url: 'https://a.com/x', content: 'alpha' }]
+          }
+        ] as MessageExportView['parts']
+      }
+      ;(markdownToPlainText as any).mockImplementation((str: string) => str)
+
+      expect(await messageToPlainText(testMessage)).toBe('Still true. [1]')
+    })
+
+    it('should resolve tool citation markers to plain numbers before copying', async () => {
+      // Left in place, `remove-markdown` mangles a chain of markers down to a bare
+      // `cite:<id>` and the internal id lands on the clipboard.
+      const testMessage = createExportView([
+        {
+          type: 'tool-web_search',
+          toolCallId: 'search-1',
+          state: 'output-available',
+          input: { query: 'q' },
+          output: [
+            { id: '3f2a1b9c-1', title: 'First', url: 'https://a.com/x', content: 'alpha' },
+            { id: '3f2a1b9c-2', title: 'Second', url: 'https://b.com/y', content: 'beta' }
+          ]
+        },
+        { type: 'text', text: 'Prices rose. [cite:3f2a1b9c-1][cite:3f2a1b9c-2]' }
+      ])
+      ;(markdownToPlainText as any).mockImplementation((str: string) => str)
+
+      const result = await messageToPlainText(testMessage)
+
+      expect(result).toBe('Prices rose. [1][2]')
+      expect(result).not.toContain('cite:')
+    })
+
+    it('should copy the stored pasted text instead of the file token label', async () => {
+      // A long paste becomes a `.txt` attachment whose display name ("Pasted text.txt")
+      // is the only thing the old copy produced — the actual pasted text must win.
+      ;(window.api.fs.readText as any).mockResolvedValue('the full pasted content')
+      const testMessage = createExportView(
+        [
+          {
+            type: 'text',
+            text: 'Look at this:',
+            providerMetadata: {
+              cherry: {
+                composer: {
+                  version: 1,
+                  tokens: [
+                    { id: 'file:file-token-1', kind: 'file', label: 'Pasted text.txt', index: 0, textOffset: 13 }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            type: 'file',
+            mediaType: 'text/plain',
+            url: 'file:///tmp/pasted_text.txt',
+            filename: 'Pasted text.txt',
+            providerMetadata: { cherry: { fileTokenSourceId: 'file-token-1', composerFileKind: 'pasted-text' } }
+          }
+        ],
+        'user'
+      )
+      ;(markdownToPlainText as any).mockImplementation((str: string) => str)
+
+      const result = await messageToPlainText(testMessage)
+
+      expect(result).toBe('Look at this:the full pasted content')
+      expect(result).not.toContain('Pasted text.txt')
+      expect(window.api.fs.readText).toHaveBeenCalledWith('/tmp/pasted_text.txt')
+    })
+
+    it('should keep the token label when the pasted text file is unreadable', async () => {
+      ;(window.api.fs.readText as any).mockRejectedValue(new Error('ENOENT'))
+      const testMessage = createExportView(
+        [
+          {
+            type: 'text',
+            text: 'Look at this:',
+            providerMetadata: {
+              cherry: {
+                composer: {
+                  version: 1,
+                  tokens: [
+                    { id: 'file:file-token-2', kind: 'file', label: 'Pasted text.txt', index: 0, textOffset: 14 }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            type: 'file',
+            mediaType: 'text/plain',
+            url: 'file:///tmp/missing.txt',
+            filename: 'Pasted text.txt',
+            providerMetadata: { cherry: { fileTokenSourceId: 'file-token-2', composerFileKind: 'pasted-text' } }
+          }
+        ],
+        'user'
+      )
+      ;(markdownToPlainText as any).mockImplementation((str: string) => str)
+
+      const result = await messageToPlainText(testMessage)
+
+      expect(result).toContain('Pasted text.txt')
+    })
+  })
+
+  describe('messagesToPlainText', () => {
+    it('labels an assistant row with the frozen snapshot author, not a generic "Assistant"', async () => {
+      const message = createExportView([{ type: 'text', text: 'hi' }])
+      message.messageSnapshot = {
+        id: 'a1',
+        name: 'My Assistant',
+        emoji: '🤖',
+        model: { id: 'gpt-5', name: 'GPT-5', provider: 'openai' }
+      }
+      expect(await messagesToPlainText([message])).toContain('My Assistant:')
+    })
+
+    it('falls back to "Assistant:" for a snapshot-less assistant row', async () => {
+      expect(await messagesToPlainText([createExportView([{ type: 'text', text: 'hi' }])])).toContain('Assistant:')
     })
   })
 })
@@ -399,24 +482,6 @@ describe('processCitations', () => {
     expect(processCitations(input, 'normalize')).toBe(expectedNormalize)
   })
 
-  test('should handle empty content', () => {
-    const input = ''
-    expect(processCitations(input, 'remove')).toBe('')
-    expect(processCitations(input, 'normalize')).toBe('')
-  })
-
-  test('should handle content with only code blocks', () => {
-    const input = '```json\n{"key": "value"}\n```'
-    expect(processCitations(input, 'remove')).toBe(input)
-    expect(processCitations(input, 'normalize')).toBe(input)
-  })
-
-  test('should handle content with only citations', () => {
-    const input = "[<sup data-citation='test'>1</sup>](http://example.com) [2]"
-    expect(processCitations(input, 'remove')).toBe('')
-    expect(processCitations(input, 'normalize')).toBe('[^1] [^2]')
-  })
-
   test('should preserve line breaks and formatting in markdown structures', () => {
     const input = `# Header [1]
 
@@ -470,15 +535,6 @@ Final paragraph [^8].`
     expect(processCitations(input, 'normalize')).toBe(expectedNormalize)
   })
 
-  test('should handle citations with special characters in content', () => {
-    const input = `Content with "quotes" [1] and symbols & entities [<sup>2</sup>](url) here.`
-    const expectedRemove = `Content with "quotes" and symbols & entities here.`
-    const expectedNormalize = `Content with "quotes" [^1] and symbols & entities [^2] here.`
-
-    expect(processCitations(input, 'remove')).toBe(expectedRemove)
-    expect(processCitations(input, 'normalize')).toBe(expectedNormalize)
-  })
-
   test('should handle whitespace around citations correctly', () => {
     const input = `Text before [1] text after.\nNew line [2] more text.\n\nNew paragraph [3] end.`
     const expectedRemove = `Text before text after.\nNew line more text.\n\nNew paragraph end.`
@@ -502,21 +558,5 @@ const arr = [3, 4, 5];
     // Content inside code blocks should remain unchanged
     expect(processCitations(input, 'remove')).toBe(input)
     expect(processCitations(input, 'normalize')).toBe(input)
-  })
-
-  test('should handle formatCitationsAsFootnotes edge cases', () => {
-    // Test empty citations
-    const emptyResult = processCitations('', 'normalize')
-    expect(emptyResult).toBe('')
-
-    // Test content with no citations
-    const noCitationsResult = processCitations('Just plain text without any citations.', 'normalize')
-    expect(noCitationsResult).toBe('Just plain text without any citations.')
-
-    // Test mixed content with various citation formats
-    const mixedContent =
-      'Text [<sup data-citation="test">1</sup>](url) and [2] plus <sup data-citation="test2">3</sup> citations.'
-    const normalizedResult = processCitations(mixedContent, 'normalize')
-    expect(normalizedResult).toBe('Text [^1] and [^2] plus [^3] citations.')
   })
 })

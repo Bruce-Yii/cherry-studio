@@ -1,8 +1,13 @@
+import type { BrowserWindow } from 'electron'
+import { app, Menu } from 'electron'
+
 import { application } from '@application'
+import { loggerService } from '@logger'
 import { BaseService, Conditional, Injectable, onPlatform, Phase, ServicePhase } from '@main/core/lifecycle'
+import { t } from '@main/i18n'
+import { openSettingsInMainWindow } from '@main/services/mainWindowNavigation'
 import type { NativeCommandMenuItem, NativeMenuItem } from '@main/services/menu/adapters/nativeMenuAdapter'
 import { toElectronMenuTemplate } from '@main/services/menu/adapters/nativeMenuAdapter'
-import { getAppLanguage, locales } from '@main/utils/language'
 import type { PreferenceShortcutType } from '@shared/data/preference/preferenceTypes'
 import type { SupportedPlatform } from '@shared/types/command'
 import {
@@ -13,8 +18,9 @@ import {
   resolveCommandKeybinding,
   resolveMenu
 } from '@shared/utils/command'
-import type { BrowserWindow } from 'electron'
-import { app, Menu, shell } from 'electron'
+import { doctorSettingsPath } from '@shared/utils/doctor'
+
+const logger = loggerService.withContext('AppMenuService')
 
 const appMenuCommands: CommandId[] = ['app.settings.open', 'app.zoom.in', 'app.zoom.out', 'app.zoom.reset']
 
@@ -60,14 +66,11 @@ export class AppMenuService extends BaseService {
   }
 
   private setupApplicationMenu(): void {
-    const locale = locales[getAppLanguage()]
-    const { appMenu } = locale.translation
-
     const commandItems = this.resolveAppMenuCommandItems({
-      'app.settings.open': locale.translation.settings.title,
-      'app.zoom.reset': appMenu.resetZoom,
-      'app.zoom.in': appMenu.zoomIn,
-      'app.zoom.out': appMenu.zoomOut
+      'app.settings.open': t('settings.title'),
+      'app.zoom.reset': t('appMenu.resetZoom'),
+      'app.zoom.in': t('appMenu.zoomIn'),
+      'app.zoom.out': t('appMenu.zoomOut')
     })
     const getCommandItem = (command: CommandId): NativeCommandMenuItem => {
       const item = commandItems.get(command)
@@ -84,96 +87,115 @@ export class AppMenuService extends BaseService {
         children: [
           {
             type: 'custom',
-            label: appMenu.about + ' ' + app.name,
+            label: t('appMenu.about') + ' ' + app.name,
             click: () => {
-              application.get('SettingsWindowService').open('/settings/about')
+              openSettingsInMainWindow('/settings/about')
             }
           },
           getCommandItem('app.settings.open'),
           { type: 'separator' },
-          { type: 'role', role: 'services', label: appMenu.services },
+          { type: 'role', role: 'services', label: t('appMenu.services') },
           { type: 'separator' },
-          { type: 'role', role: 'hide', label: `${appMenu.hide} ${app.name}` },
-          { type: 'role', role: 'hideOthers', label: appMenu.hideOthers },
-          { type: 'role', role: 'unhide', label: appMenu.unhide },
+          { type: 'role', role: 'hide', label: `${t('appMenu.hide')} ${app.name}` },
+          { type: 'role', role: 'hideOthers', label: t('appMenu.hideOthers') },
+          { type: 'role', role: 'unhide', label: t('appMenu.unhide') },
           { type: 'separator' },
-          { type: 'role', role: 'quit', label: `${appMenu.quit} ${app.name}` }
+          { type: 'role', role: 'quit', label: `${t('appMenu.quit')} ${app.name}` }
         ]
       },
       {
         type: 'submenu',
-        label: appMenu.file,
-        children: [{ type: 'role', role: 'close', label: appMenu.close }]
+        label: t('appMenu.file'),
+        children: [{ type: 'role', role: 'close', label: t('appMenu.close') }]
       },
       {
         type: 'submenu',
-        label: appMenu.edit,
+        label: t('appMenu.edit'),
         children: [
-          { type: 'role', role: 'undo', label: appMenu.undo },
-          { type: 'role', role: 'redo', label: appMenu.redo },
+          { type: 'role', role: 'undo', label: t('appMenu.undo') },
+          { type: 'role', role: 'redo', label: t('appMenu.redo') },
           { type: 'separator' },
-          { type: 'role', role: 'cut', label: appMenu.cut },
-          { type: 'role', role: 'copy', label: appMenu.copy },
-          { type: 'role', role: 'paste', label: appMenu.paste },
-          { type: 'role', role: 'delete', label: appMenu.delete },
-          { type: 'role', role: 'selectAll', label: appMenu.selectAll }
+          { type: 'role', role: 'cut', label: t('appMenu.cut') },
+          { type: 'role', role: 'copy', label: t('appMenu.copy') },
+          { type: 'role', role: 'paste', label: t('appMenu.paste') },
+          { type: 'role', role: 'delete', label: t('appMenu.delete') },
+          { type: 'role', role: 'selectAll', label: t('appMenu.selectAll') }
         ]
       },
       {
         type: 'submenu',
-        label: appMenu.view,
+        label: t('appMenu.view'),
         children: [
-          { type: 'role', role: 'reload', label: appMenu.reload },
-          { type: 'role', role: 'forceReload', label: appMenu.forceReload },
-          { type: 'role', role: 'toggleDevTools', label: appMenu.toggleDevTools },
+          { type: 'role', role: 'reload', label: t('appMenu.reload') },
+          { type: 'role', role: 'forceReload', label: t('appMenu.forceReload') },
+          { type: 'role', role: 'toggleDevTools', label: t('appMenu.toggleDevTools') },
           { type: 'separator' },
           getCommandItem('app.zoom.reset'),
           getCommandItem('app.zoom.in'),
           getCommandItem('app.zoom.out'),
           { type: 'separator' },
-          { type: 'role', role: 'togglefullscreen', label: appMenu.toggleFullscreen }
+          { type: 'role', role: 'togglefullscreen', label: t('appMenu.toggleFullscreen') }
         ]
       },
       {
         type: 'submenu',
-        label: appMenu.window,
+        label: t('appMenu.window'),
         children: [
-          { type: 'role', role: 'minimize', label: appMenu.minimize },
-          { type: 'role', role: 'zoom', label: appMenu.zoom },
+          { type: 'role', role: 'minimize', label: t('appMenu.minimize') },
+          { type: 'role', role: 'zoom', label: t('appMenu.zoom') },
           { type: 'separator' },
-          { type: 'role', role: 'front', label: appMenu.front }
+          { type: 'role', role: 'front', label: t('appMenu.front') }
         ]
       },
       {
         type: 'submenu',
-        label: appMenu.help,
+        label: t('appMenu.help'),
         children: [
           {
             type: 'custom',
-            label: appMenu.website,
+            label: t('appMenu.website'),
             click: () => {
-              void shell.openExternal('https://cherry-ai.com')
+              void application
+                .get('MainWindowService')
+                .openWebsite('https://cherry-ai.com')
+                .catch((error) => logger.warn('Failed to open website', { error }))
             }
           },
           {
             type: 'custom',
-            label: appMenu.documentation,
+            label: t('appMenu.documentation'),
             click: () => {
-              void shell.openExternal('https://cherry-ai.com/docs')
+              void application
+                .get('MainWindowService')
+                .openWebsite('https://cherry-ai.com/docs')
+                .catch((error) => logger.warn('Failed to open website', { error }))
             }
           },
           {
             type: 'custom',
-            label: appMenu.feedback,
+            label: t('appMenu.doctor'),
             click: () => {
-              void shell.openExternal('https://github.com/CherryHQ/cherry-studio/issues/new/choose')
+              openSettingsInMainWindow(doctorSettingsPath('checks'))
             }
           },
           {
             type: 'custom',
-            label: appMenu.releases,
+            label: t('appMenu.feedback'),
             click: () => {
-              void shell.openExternal('https://github.com/CherryHQ/cherry-studio/releases')
+              void application
+                .get('MainWindowService')
+                .openWebsite('https://github.com/CherryHQ/cherry-studio/issues/new/choose')
+                .catch((error) => logger.warn('Failed to open website', { error }))
+            }
+          },
+          {
+            type: 'custom',
+            label: t('appMenu.releases'),
+            click: () => {
+              void application
+                .get('MainWindowService')
+                .openWebsite('https://github.com/CherryHQ/cherry-studio/releases')
+                .catch((error) => logger.warn('Failed to open website', { error }))
             }
           }
         ]

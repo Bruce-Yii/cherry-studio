@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
-
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -19,9 +18,14 @@ vi.mock('@cherrystudio/ui', async () => {
 })
 
 // Resolve only `openai` to a recognizable stand-in icon; everything else is unknown.
-vi.mock('@cherrystudio/ui/icons', () => ({
-  resolveProviderIcon: (id: string) => (id === 'openai' ? () => <span data-testid="brand-icon" /> : undefined)
-}))
+vi.mock('@cherrystudio/ui/icons', () => {
+  const BrandIcon = () => <span data-testid="brand-icon" />
+  return {
+    resolveProviderIconRef: (id: string) =>
+      id === 'openai' ? { kind: 'provider', key: id, meta: { id, colorPrimary: '#000' } } : undefined,
+    useIcon: (ref: unknown) => (ref ? BrandIcon : undefined)
+  }
+})
 
 import { ProviderAvatarPrimitive } from '../ProviderAvatar'
 
@@ -47,7 +51,7 @@ class StubImage {
 const IMAGE_LOGO = 'data:image/png;base64,abc'
 
 beforeEach(() => {
-  vi.stubGlobal('Image', StubImage as unknown as typeof Image)
+  vi.stubGlobal('Image', StubImage)
 })
 
 afterEach(() => {

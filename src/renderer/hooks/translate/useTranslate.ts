@@ -20,14 +20,16 @@
  * accumulated text into their own view state.
  */
 
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { v4 as uuid } from 'uuid'
+
 import { loggerService } from '@logger'
+import { toast } from '@renderer/services/toast'
 import { formatErrorMessageWithPrefix, isAbortError } from '@renderer/utils/error'
 import { translateText } from '@renderer/utils/translate'
 import type { TranslateLangCode } from '@shared/data/preference/preferenceTypes'
 import type { TranslateLanguage } from '@shared/data/types/translate'
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { useTranslation } from 'react-i18next'
-import { v4 as uuid } from 'uuid'
 
 const TRANSLATE_ERROR_KEY_PATTERN = /\btranslate\.error\.[a-zA-Z0-9_.-]+\b/
 
@@ -151,7 +153,7 @@ export function useTranslate(options?: UseTranslateOptions): UseTranslateResult 
         const errorPrefixI18nKey = opts?.errorPrefixI18nKey ?? 'translate.error.failed'
         loggerService.withContext(opts?.loggerContext ?? 'useTranslate').error('Translation failed', error as Error)
         if (showErrorToast) {
-          window.toast?.error(formatErrorMessageWithPrefix(localizeTranslateError(error, t), t(errorPrefixI18nKey)))
+          toast.error(formatErrorMessageWithPrefix(localizeTranslateError(error, t), t(errorPrefixI18nKey)))
         }
         if (opts?.rethrowError) throw error
         return undefined

@@ -18,41 +18,76 @@
  * module-level layering rules.
  */
 
+import {
+  and,
+  asc,
+  count,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  notInArray,
+  or,
+  type SQL,
+  sql,
+  type SQLWrapper
+} from 'drizzle-orm'
+import { v7 as uuidv7 } from 'uuid'
+import * as z from 'zod'
+import { ZodError } from 'zod'
+
 import { application } from '@application'
-import { fileEntryTable, fileRefTable } from '@data/db/schemas/file'
+import { fileEntryTable } from '@data/db/schemas/file'
+import { persistentRefAbsenceConditions } from '@data/db/schemas/fileRelations'
 import type { DbOrTx } from '@data/db/types'
 import { loggerService } from '@logger'
-import { DataApiErrorFactory } from '@shared/data/api'
+import { DataApiErrorFactory } from '@shared/data/api/errors'
 import type { FileEntryListResponse, FileEntryStats } from '@shared/data/api/schemas/files'
-import type { CanonicalExternalPath, FileEntry, FileEntryId, FileEntryOrigin } from '@shared/data/types/file'
+import type {
+  CleanupPolicy,
+  ContentHash,
+  FileEntry,
+  FileEntryId,
+  FileEntryOrigin,
+  InternalFileEntry
+} from '@shared/data/types/file'
 import {
-  AbsolutePathSchema,
+  CleanupPolicySchema,
+  ContentHashSchema,
   ExternalEntrySchema,
   FileEntrySchema,
   InternalEntrySchema,
   SafeNameSchema
 } from '@shared/data/types/file'
-import { and, asc, count, eq, isNotNull, isNull, type SQL, sql, type SQLWrapper } from 'drizzle-orm'
-import { v7 as uuidv7 } from 'uuid'
-import * as z from 'zod'
-import { ZodError } from 'zod'
+import type { FileType } from '@shared/types/file'
+import { type CanonicalFilePath, fileTypeMap } from '@shared/utils/file'
 
 import { asNumericKey, asStringKey, decodeListCursor, encodeCursor, keysetOrdering } from './utils/keysetCursor'
 
 const logger = loggerService.withContext('FileEntryService')
 
+// `cleanupPolicy` MUST stay required on both branches — no `.default()` / `.optional()`.
+// This is the single compile-time forcing point that makes every creation surface
+// choose a policy explicitly (file-entry-cleanup.md §4.1). Adding a default here would
+// silently let a forgotten assignment fall through to the DB backstop, defeating the
+// "leak recoverably rather than delete unrecoverably" invariant.
 const CreateFileEntryRowSchema = z.discriminatedUnion('origin', [
   z.strictObject({
     id: InternalEntrySchema.shape.id,
     origin: z.literal('internal'),
     name: InternalEntrySchema.shape.name,
     ext: InternalEntrySchema.shape.ext,
-    size: InternalEntrySchema.shape.size
+    cleanupPolicy: CleanupPolicySchema,
+    size: InternalEntrySchema.shape.size,
+    contentHash: ContentHashSchema.nullable().optional()
   }),
   z.strictObject({
     origin: z.literal('external'),
     name: ExternalEntrySchema.shape.name,
     ext: ExternalEntrySchema.shape.ext,
+    cleanupPolicy: CleanupPolicySchema,
     externalPath: ExternalEntrySchema.shape.externalPath
   })
 ])
@@ -66,15 +101,22 @@ const CreateFileEntryRowSchema = z.discriminatedUnion('origin', [
 export type CreateFileEntryRow = z.input<typeof CreateFileEntryRowSchema>
 
 /**
- * Columns that may be mutated post-insert. Origin / id / externalPath are
- * immutable. Note `size` is included because internal-file writes update the
- * byte count atomically; on external rows it must remain `null`.
+ * Columns that may be mutated through the generic update surface. Origin / id /
+ * externalPath and bytes-derived metadata are intentionally excluded; content
+ * commits use the dedicated begin / complete / restore methods below.
  */
 export interface UpdateFileEntryRow {
   readonly name?: string
   readonly ext?: string | null
-  readonly size?: number
+  readonly cleanupPolicy?: CleanupPolicy
   readonly deletedAt?: number | null
+}
+
+export interface InternalContentCommitSnapshot {
+  readonly size: number
+  readonly contentHash: ContentHash | null
+  readonly updatedAt: number
+  readonly commitAt: number
 }
 
 export interface FindEntriesQuery {
@@ -87,8 +129,10 @@ export interface FindEntriesQuery {
 export type ListFilesSortBy = 'name' | 'createdAt' | 'updatedAt' | 'size' | 'ext'
 
 export interface ListCursorQuery {
+  readonly ids?: readonly FileEntryId[]
   readonly origin?: FileEntryOrigin
   readonly inTrash?: boolean
+  readonly fileType?: FileType
   readonly sortBy?: ListFilesSortBy
   readonly sortOrder?: 'asc' | 'desc'
   readonly cursor?: string
@@ -96,29 +140,29 @@ export interface ListCursorQuery {
 }
 
 export interface FileEntryService {
-  /** Run serialized DB writes through DbService.withWriteTx. */
-  withWriteTx<T>(fn: (tx: DbOrTx) => Promise<T>): Promise<T>
+  /** Run serialized DB writes through DbService.withWriteTx (synchronous — no await needed). */
+  withWriteTx<T>(fn: (tx: DbOrTx) => T): T
 
   /** Return the entry, or `null` if not found. Trashed entries are included. */
-  findById(id: FileEntryId): Promise<FileEntry | null>
+  findById(id: FileEntryId): FileEntry | null
 
   /** Tx-scoped variant of `findById` for composing write flows. */
-  findByIdTx(tx: DbOrTx, id: FileEntryId): Promise<FileEntry | null>
+  findByIdTx(tx: DbOrTx, id: FileEntryId): FileEntry | null
 
   /** Return the entry, or throw. Trashed entries are included. */
-  getById(id: FileEntryId): Promise<FileEntry>
+  getById(id: FileEntryId): FileEntry
 
   /** Tx-scoped variant of `getById` for composing write flows. */
-  getByIdTx(tx: DbOrTx, id: FileEntryId): Promise<FileEntry>
+  getByIdTx(tx: DbOrTx, id: FileEntryId): FileEntry
 
   /**
    * Look up an external entry by canonical `externalPath`. Returns `null` when
-   * no row matches. The `CanonicalExternalPath` brand forces callers through
-   * `canonicalizeExternalPath()` at compile time — raw `string` values are
-   * not assignable here, which prevents the "caller forgot to canonicalize"
-   * class of bug that would silently miss all matches.
+   * no row matches. The `CanonicalFilePath` brand forces callers through
+   * `canonicalizeFilePath()` at compile time — raw `string` / bare `AbsoluteFilePath`
+   * values are not assignable here, which prevents the "caller forgot to
+   * canonicalize" class of bug that would silently miss all matches.
    */
-  findByExternalPath(canonicalPath: CanonicalExternalPath): Promise<FileEntry | null>
+  findByExternalPath(canonicalPath: CanonicalFilePath): FileEntry | null
 
   /**
    * Return external entries whose `externalPath` matches `canonicalPath`
@@ -146,18 +190,42 @@ export interface FileEntryService {
    *
    * Un-parseable rows are skipped with a warning (see `rowToFileEntrySafe`).
    */
-  findCaseInsensitivePeers(canonicalPath: CanonicalExternalPath): Promise<FileEntry[]>
+  findCaseInsensitivePeers(canonicalPath: CanonicalFilePath): FileEntry[]
+
+  /** Active internal entries whose persisted hash exactly matches, oldest first. */
+  findInternalByContentHash(contentHash: ContentHash): FileEntry[]
+
+  /** Number of internal rows awaiting content-hash backfill, including trashed rows. */
+  countInternalMissingContentHash(): number
+
+  /** Keyset page of internal rows awaiting content-hash backfill, including trashed rows. */
+  findInternalMissingContentHash(afterId: FileEntryId | null, limit: number): InternalFileEntry[]
+
+  /** Mark bytes-derived metadata unknown before an internal blob is atomically replaced. */
+  beginInternalContentCommit(id: FileEntryId, commitAt: number): InternalContentCommitSnapshot
+
+  /** Persist metadata derived from the exact bytes committed by a foreground writer. */
+  completeInternalContentCommit(id: FileEntryId, metadata: { size: number; contentHash: ContentHash }): boolean
+
+  /** Restore the pre-write metadata when the filesystem commit did not land. */
+  restoreInternalContentAfterFailedCommit(id: FileEntryId, snapshot: InternalContentCommitSnapshot): boolean
+
+  /** Repair unknown bytes-derived metadata without changing user-visible timestamps. */
+  repairInternalContentMetadataIfUnknown(id: FileEntryId, metadata: { size: number; contentHash: ContentHash }): boolean
 
   /**
    * Flat listing. Trashed filter defaults to "active only" when `inTrash` is omitted.
    * Un-parseable rows are skipped with a warning (see `rowToFileEntrySafe`).
    */
-  findMany(query?: FindEntriesQuery): Promise<FileEntry[]>
+  findMany(query?: FindEntriesQuery): FileEntry[]
+
+  /** Tx-scoped variant of `findMany` for composing write flows. */
+  findManyTx(tx: DbOrTx, query?: FindEntriesQuery): FileEntry[]
 
   /**
    * Cursor-and-count list backing `GET /files/entries`. Returns
    * `{ items, total, nextCursor }` matching the DataApi cursor response shape,
-   * doing the select + count in a single round-trip via `Promise.all`.
+   * running the page select and the total count as two sequential synchronous queries.
    *
    * Defaults: `limit = 50`, `sortBy = 'createdAt'`, `sortOrder = 'asc'`.
    * Trashed filter defaults to "active only" when `inTrash` is omitted, matching
@@ -171,41 +239,47 @@ export interface FileEntryService {
    * `total` is a SQL count and may exceed `items.length` when corrupted
    * rows were skipped.
    */
-  listCursor(query?: ListCursorQuery): Promise<FileEntryListResponse>
+  listCursor(query?: ListCursorQuery): FileEntryListResponse
 
   /**
    * Pure-SQL aggregate counts backing the file sidebar. Counts active rows by
    * extension and active external rows by dirname, plus active/trash totals.
    */
-  getStats(): Promise<FileEntryStats>
+  getStats(): FileEntryStats
 
   /**
-   * Active (non-trashed) entries with zero `file_ref` rows pointing at them.
-   * Used by Phase 1b.4 OrphanRefScanner's report-only entry pass — see
-   * file-manager-architecture §7.1 (default policy is "preserve").
+   * Active (non-trashed) **manual-policy** entries with zero persistent
+   * association rows pointing at them — the DB orphan report's data source.
+   * `delete_when_unreferenced` entries are deliberately excluded: they are
+   * owned by the cleanup pass (`findCleanupCandidates`), so reporting them
+   * here too would double-count auto entries still pending reclamation
+   * (young, or beyond the per-pass batch) as manual orphans.
    *
    * Un-parseable rows are skipped with a warning (see `rowToFileEntrySafe`).
    */
-  findUnreferenced(query?: { origin?: FileEntryOrigin }): Promise<FileEntry[]>
+  findManualUnreferenced(query?: { origin?: FileEntryOrigin }): FileEntry[]
+
+  /** Auto-policy entries past grace with zero persistent refs (trashed included) — backs the GC pass. */
+  findCleanupCandidates(opts: { graceMs: number; limit: number }): FileEntry[]
 
   /**
-   * All entry ids regardless of trashed state — backs the Phase 1b.4 startup
-   * file sweep, which needs to know which on-disk UUID files have a DB row
+   * All entry ids regardless of trashed state — backs the FS orphan sweep,
+   * which needs to know which on-disk UUID files have a DB row
    * (active or trashed; both are out of scope for unlink).
    */
-  listAllIds(): Promise<Set<FileEntryId>>
+  listAllIds(): Set<FileEntryId>
 
   /** Insert a new row. Violates `fe_origin_consistency` / `fe_size_internal_only` → throws. */
-  create(values: CreateFileEntryRow): Promise<FileEntry>
+  create(values: CreateFileEntryRow): FileEntry
 
   /** Tx-scoped variant of `create` for composing write flows. */
-  createTx(tx: DbOrTx, values: CreateFileEntryRow): Promise<FileEntry>
+  createTx(tx: DbOrTx, values: CreateFileEntryRow): FileEntry
 
   /** Update mutable columns. Returns the refreshed row. Throws if not found. */
-  update(id: FileEntryId, values: UpdateFileEntryRow): Promise<FileEntry>
+  update(id: FileEntryId, values: UpdateFileEntryRow): FileEntry
 
   /** Tx-scoped variant of `update` for composing write flows. */
-  updateTx(tx: DbOrTx, id: FileEntryId, values: UpdateFileEntryRow): Promise<FileEntry>
+  updateTx(tx: DbOrTx, id: FileEntryId, values: UpdateFileEntryRow): FileEntry
 
   /**
    * Atomically rewrite both `externalPath` and `name` for an external entry.
@@ -213,21 +287,19 @@ export interface FileEntryService {
    * doing it as a single statement keeps the (path, name) pair consistent under
    * partial-failure scenarios (transient lock, schema constraint).
    */
-  setExternalPathAndName(id: FileEntryId, externalPath: CanonicalExternalPath, name: string): Promise<FileEntry>
+  setExternalPathAndName(id: FileEntryId, externalPath: CanonicalFilePath, name: string): FileEntry
 
   /** Tx-scoped variant of `setExternalPathAndName` for composing write flows. */
-  setExternalPathAndNameTx(
-    tx: DbOrTx,
-    id: FileEntryId,
-    externalPath: CanonicalExternalPath,
-    name: string
-  ): Promise<FileEntry>
+  setExternalPathAndNameTx(tx: DbOrTx, id: FileEntryId, externalPath: CanonicalFilePath, name: string): FileEntry
 
-  /** Remove the row (CASCADE drops dependent `file_ref`s). No-op if already gone. */
-  delete(id: FileEntryId): Promise<void>
+  /** Remove the row (CASCADE drops dependent persistent file refs). No-op if already gone. */
+  delete(id: FileEntryId): void
+
+  /** Hard-delete trashed entries older than the retention cutoff. */
+  purgeExpiredTx(tx: DbOrTx, cutoffMs: number, limit: number): FileEntryId[]
 
   /** Tx-scoped variant of `delete` for composing write flows. */
-  deleteTx(tx: DbOrTx, id: FileEntryId): Promise<void>
+  deleteTx(tx: DbOrTx, id: FileEntryId): void
 }
 
 type FileEntryRow = typeof fileEntryTable.$inferSelect
@@ -260,7 +332,9 @@ function rowToFileEntry(row: FileEntryRow): FileEntry {
       origin: 'internal',
       name: row.name,
       ext: row.ext,
+      cleanupPolicy: row.cleanupPolicy,
       size: row.size,
+      contentHash: row.contentHash,
       // deletedAt is `optional` on the BO — present iff the DB column is
       // non-null. Bypass `nullsToUndefined` so we don't pull in a helper
       // whose project-wide meaning is "every null becomes undefined";
@@ -275,6 +349,7 @@ function rowToFileEntry(row: FileEntryRow): FileEntry {
     origin: 'external',
     name: row.name,
     ext: row.ext,
+    cleanupPolicy: row.cleanupPolicy,
     externalPath: row.externalPath,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
@@ -319,6 +394,21 @@ const DEFAULT_LIST_SORT_ORDER: ListSortOrder = 'asc'
 const FILE_ENTRY_SIZE_NULL_SORT_VALUE = -1
 // SafeExtSchema rejects whitespace, so this non-empty cursor key is reserved for NULL ext and sorts before real ext values.
 const FILE_ENTRY_EXT_NULL_SORT_VALUE = ' '
+const FILE_EXTENSIONS_BY_TYPE = new Map<FileType, string[]>()
+for (const [extension, fileType] of Object.entries(fileTypeMap)) {
+  const extensions = FILE_EXTENSIONS_BY_TYPE.get(fileType) ?? []
+  extensions.push(extension)
+  FILE_EXTENSIONS_BY_TYPE.set(fileType, extensions)
+}
+const KNOWN_FILE_EXTENSIONS = Object.keys(fileTypeMap)
+
+function getFileTypeFilterCondition(fileType: FileType): SQL {
+  const normalizedExtension = sql<string>`lower(${fileEntryTable.ext})`
+  if (fileType === 'other') {
+    return or(isNull(fileEntryTable.ext), notInArray(normalizedExtension, KNOWN_FILE_EXTENSIONS))!
+  }
+  return inArray(normalizedExtension, FILE_EXTENSIONS_BY_TYPE.get(fileType) ?? [])
+}
 
 function getListSortValue(row: FileEntryRow, sortBy: ListSortBy): string | number {
   switch (sortBy) {
@@ -363,42 +453,43 @@ class FileEntryServiceImpl implements FileEntryService {
     return this.getDbService().getDb()
   }
 
-  withWriteTx<T>(fn: (tx: DbOrTx) => Promise<T>): Promise<T> {
+  withWriteTx<T>(fn: (tx: DbOrTx) => T): T {
     return this.getDbService().withWriteTx(fn)
   }
 
-  async findById(id: FileEntryId): Promise<FileEntry | null> {
+  findById(id: FileEntryId): FileEntry | null {
     return this.findByIdTx(this.getDb(), id)
   }
 
-  async findByIdTx(tx: DbOrTx, id: FileEntryId): Promise<FileEntry | null> {
-    const rows = await tx.select().from(fileEntryTable).where(eq(fileEntryTable.id, id)).limit(1)
+  findByIdTx(tx: DbOrTx, id: FileEntryId): FileEntry | null {
+    const rows = tx.select().from(fileEntryTable).where(eq(fileEntryTable.id, id)).limit(1).all()
     return rows.length === 0 ? null : rowToFileEntry(rows[0])
   }
 
-  async getById(id: FileEntryId): Promise<FileEntry> {
+  getById(id: FileEntryId): FileEntry {
     return this.getByIdTx(this.getDb(), id)
   }
 
-  async getByIdTx(tx: DbOrTx, id: FileEntryId): Promise<FileEntry> {
-    const entry = await this.findByIdTx(tx, id)
+  getByIdTx(tx: DbOrTx, id: FileEntryId): FileEntry {
+    const entry = this.findByIdTx(tx, id)
     if (!entry) {
       throw DataApiErrorFactory.notFound('FileEntry', id)
     }
     return entry
   }
 
-  async findByExternalPath(canonicalPath: CanonicalExternalPath): Promise<FileEntry | null> {
-    const rows = await this.getDb()
+  findByExternalPath(canonicalPath: CanonicalFilePath): FileEntry | null {
+    const rows = this.getDb()
       .select()
       .from(fileEntryTable)
       .where(eq(fileEntryTable.externalPath, canonicalPath))
       .limit(1)
+      .all()
     return rows.length === 0 ? null : rowToFileEntry(rows[0])
   }
 
-  async findCaseInsensitivePeers(canonicalPath: CanonicalExternalPath): Promise<FileEntry[]> {
-    const rows = await this.getDb()
+  findCaseInsensitivePeers(canonicalPath: CanonicalFilePath): FileEntry[] {
+    const rows = this.getDb()
       .select()
       .from(fileEntryTable)
       .where(
@@ -412,10 +503,124 @@ class FileEntryServiceImpl implements FileEntryService {
       // tests and for the surviving-row selection in any future FileMigrator
       // dedupe pass).
       .orderBy(asc(fileEntryTable.createdAt), asc(fileEntryTable.id))
+      .all()
     return rows.map(rowToFileEntrySafe).filter((e): e is FileEntry => e !== null)
   }
 
-  async findMany(query: FindEntriesQuery = {}): Promise<FileEntry[]> {
+  findInternalByContentHash(contentHash: ContentHash): FileEntry[] {
+    const rows = this.getDb()
+      .select()
+      .from(fileEntryTable)
+      .where(
+        and(
+          eq(fileEntryTable.origin, 'internal'),
+          isNull(fileEntryTable.deletedAt),
+          eq(fileEntryTable.contentHash, contentHash)
+        )
+      )
+      .orderBy(asc(fileEntryTable.createdAt), asc(fileEntryTable.id))
+      .all()
+    return rows.map(rowToFileEntrySafe).filter((entry): entry is FileEntry => entry !== null)
+  }
+
+  countInternalMissingContentHash(): number {
+    const rows = this.getDb()
+      .select({ value: count() })
+      .from(fileEntryTable)
+      .where(and(eq(fileEntryTable.origin, 'internal'), isNull(fileEntryTable.contentHash)))
+      .all()
+    return rows[0]?.value ?? 0
+  }
+
+  findInternalMissingContentHash(afterId: FileEntryId | null, limit: number): InternalFileEntry[] {
+    const conditions: SQL[] = [eq(fileEntryTable.origin, 'internal'), isNull(fileEntryTable.contentHash)]
+    if (afterId !== null) conditions.push(gt(fileEntryTable.id, afterId))
+    const rows = this.getDb()
+      .select()
+      .from(fileEntryTable)
+      .where(and(...conditions))
+      .orderBy(asc(fileEntryTable.id))
+      .limit(limit)
+      .all()
+    return rows.map((row) => {
+      const entry = rowToFileEntry(row)
+      if (entry.origin !== 'internal') throw new Error('Expected an internal file entry')
+      return entry
+    })
+  }
+
+  beginInternalContentCommit(id: FileEntryId, commitAt: number): InternalContentCommitSnapshot {
+    return application.get('DbService').withWriteTx((tx) => {
+      const row = tx
+        .select({
+          size: fileEntryTable.size,
+          contentHash: fileEntryTable.contentHash,
+          updatedAt: fileEntryTable.updatedAt
+        })
+        .from(fileEntryTable)
+        .where(and(eq(fileEntryTable.id, id), eq(fileEntryTable.origin, 'internal')))
+        .get()
+      if (!row || row.size === null) {
+        throw DataApiErrorFactory.notFound('InternalFileEntry', id)
+      }
+      tx.update(fileEntryTable)
+        .set({ contentHash: null, updatedAt: commitAt })
+        .where(and(eq(fileEntryTable.id, id), eq(fileEntryTable.origin, 'internal')))
+        .run()
+      return {
+        size: row.size,
+        contentHash: row.contentHash === null ? null : ContentHashSchema.parse(row.contentHash),
+        updatedAt: row.updatedAt,
+        commitAt
+      }
+    })
+  }
+
+  completeInternalContentCommit(id: FileEntryId, metadata: { size: number; contentHash: ContentHash }): boolean {
+    const size = InternalEntrySchema.shape.size.parse(metadata.size)
+    const contentHash = ContentHashSchema.parse(metadata.contentHash)
+    const rows = this.getDb()
+      .update(fileEntryTable)
+      .set({
+        size,
+        contentHash,
+        updatedAt: sql`${fileEntryTable.updatedAt}`
+      })
+      .where(and(eq(fileEntryTable.id, id), eq(fileEntryTable.origin, 'internal'), isNull(fileEntryTable.contentHash)))
+      .returning({ id: fileEntryTable.id })
+      .all()
+    return rows.length > 0
+  }
+
+  restoreInternalContentAfterFailedCommit(id: FileEntryId, snapshot: InternalContentCommitSnapshot): boolean {
+    const rows = this.getDb()
+      .update(fileEntryTable)
+      .set({
+        size: snapshot.size,
+        contentHash: snapshot.contentHash,
+        updatedAt: sql`CASE WHEN ${fileEntryTable.updatedAt} = ${snapshot.commitAt}
+          THEN ${snapshot.updatedAt}
+          ELSE ${fileEntryTable.updatedAt}
+        END`
+      })
+      .where(and(eq(fileEntryTable.id, id), eq(fileEntryTable.origin, 'internal'), isNull(fileEntryTable.contentHash)))
+      .returning({ id: fileEntryTable.id })
+      .all()
+    return rows.length > 0
+  }
+
+  repairInternalContentMetadataIfUnknown(
+    id: FileEntryId,
+    metadata: { size: number; contentHash: ContentHash }
+  ): boolean {
+    return this.completeInternalContentCommit(id, metadata)
+  }
+
+  findMany(query: FindEntriesQuery = {}): FileEntry[] {
+    return this.findManyTx(this.getDb(), query)
+  }
+
+  findManyTx(tx: DbOrTx, query: FindEntriesQuery = {}): FileEntry[] {
     const conditions: SQL[] = []
     if (query.origin) {
       conditions.push(eq(fileEntryTable.origin, query.origin))
@@ -426,7 +631,7 @@ class FileEntryServiceImpl implements FileEntryService {
       conditions.push(isNull(fileEntryTable.deletedAt))
     }
 
-    let queryBuilder = this.getDb()
+    let queryBuilder = tx
       .select()
       .from(fileEntryTable)
       .where(and(...conditions))
@@ -440,12 +645,15 @@ class FileEntryServiceImpl implements FileEntryService {
       queryBuilder = queryBuilder.offset(query.offset)
     }
 
-    const rows = await queryBuilder
+    const rows = queryBuilder.all()
     return rows.map(rowToFileEntrySafe).filter((e): e is FileEntry => e !== null)
   }
 
-  async listCursor(query: ListCursorQuery = {}): Promise<FileEntryListResponse> {
+  listCursor(query: ListCursorQuery = {}): FileEntryListResponse {
     const filterConditions: SQL[] = []
+    if (query.ids) {
+      filterConditions.push(inArray(fileEntryTable.id, query.ids))
+    }
     if (query.origin) {
       filterConditions.push(eq(fileEntryTable.origin, query.origin))
     }
@@ -453,6 +661,9 @@ class FileEntryServiceImpl implements FileEntryService {
       filterConditions.push(isNotNull(fileEntryTable.deletedAt))
     } else {
       filterConditions.push(isNull(fileEntryTable.deletedAt))
+    }
+    if (query.fileType) {
+      filterConditions.push(getFileTypeFilterCondition(query.fileType))
     }
 
     const sortBy = query.sortBy ?? DEFAULT_LIST_SORT_BY
@@ -469,15 +680,14 @@ class FileEntryServiceImpl implements FileEntryService {
     const where = and(...conditions)
     const filterWhere = and(...filterConditions)
 
-    const [rows, totalRow] = await Promise.all([
-      this.getDb()
-        .select()
-        .from(fileEntryTable)
-        .where(where)
-        .orderBy(...ordering.orderBy)
-        .limit(pageSize + 1),
-      this.getDb().select({ value: count() }).from(fileEntryTable).where(filterWhere)
-    ])
+    const rows = this.getDb()
+      .select()
+      .from(fileEntryTable)
+      .where(where)
+      .orderBy(...ordering.orderBy)
+      .limit(pageSize + 1)
+      .all()
+    const totalRow = this.getDb().select({ value: count() }).from(fileEntryTable).where(filterWhere).all()
     const pageRows = rows.slice(0, pageSize)
 
     return {
@@ -490,17 +700,24 @@ class FileEntryServiceImpl implements FileEntryService {
     }
   }
 
-  async getStats(): Promise<FileEntryStats> {
+  getStats(): FileEntryStats {
     const db = this.getDb()
-    const [activeTotalRows, trashTotalRows, extRows] = await Promise.all([
-      db.select({ count: count() }).from(fileEntryTable).where(isNull(fileEntryTable.deletedAt)),
-      db.select({ count: count() }).from(fileEntryTable).where(isNotNull(fileEntryTable.deletedAt)),
-      db
-        .select({ ext: fileEntryTable.ext, count: count() })
-        .from(fileEntryTable)
-        .where(isNull(fileEntryTable.deletedAt))
-        .groupBy(fileEntryTable.ext)
-    ])
+    const activeTotalRows = db
+      .select({ count: count() })
+      .from(fileEntryTable)
+      .where(isNull(fileEntryTable.deletedAt))
+      .all()
+    const trashTotalRows = db
+      .select({ count: count() })
+      .from(fileEntryTable)
+      .where(isNotNull(fileEntryTable.deletedAt))
+      .all()
+    const extRows = db
+      .select({ ext: fileEntryTable.ext, count: count() })
+      .from(fileEntryTable)
+      .where(isNull(fileEntryTable.deletedAt))
+      .groupBy(fileEntryTable.ext)
+      .all()
 
     return {
       activeTotal: activeTotalRows[0]?.count ?? 0,
@@ -509,53 +726,77 @@ class FileEntryServiceImpl implements FileEntryService {
     }
   }
 
-  async findUnreferenced(query: { origin?: FileEntryOrigin } = {}): Promise<FileEntry[]> {
-    const conditions: SQL[] = [isNull(fileEntryTable.deletedAt), isNull(fileRefTable.id)]
+  findManualUnreferenced(query: { origin?: FileEntryOrigin } = {}): FileEntry[] {
+    const conditions: SQL[] = [
+      isNull(fileEntryTable.deletedAt),
+      eq(fileEntryTable.cleanupPolicy, 'manual'),
+      ...persistentRefAbsenceConditions()
+    ]
     if (query.origin) conditions.push(eq(fileEntryTable.origin, query.origin))
-    const rows = await this.getDb()
+    const rows = this.getDb()
       .select({ entry: fileEntryTable })
       .from(fileEntryTable)
-      .leftJoin(fileRefTable, eq(fileRefTable.fileEntryId, fileEntryTable.id))
       .where(and(...conditions))
       .orderBy(asc(fileEntryTable.createdAt))
+      .all()
     return rows.map((r) => rowToFileEntrySafe(r.entry)).filter((e): e is FileEntry => e !== null)
   }
 
-  async listAllIds(): Promise<Set<FileEntryId>> {
-    const rows = await this.getDb().select({ id: fileEntryTable.id }).from(fileEntryTable)
+  findCleanupCandidates(opts: { graceMs: number; limit: number }): FileEntry[] {
+    const conditions: SQL[] = [
+      // NOTE: no deletedAt filter — trashed auto entries are reclaimed too (spec §5.1)
+      eq(fileEntryTable.cleanupPolicy, 'delete_when_unreferenced'),
+      lt(fileEntryTable.createdAt, Date.now() - opts.graceMs),
+      ...persistentRefAbsenceConditions()
+    ]
+    const rows = this.getDb()
+      .select({ entry: fileEntryTable })
+      .from(fileEntryTable)
+      .where(and(...conditions))
+      .orderBy(asc(fileEntryTable.createdAt))
+      .limit(opts.limit)
+      .all()
+    return rows.map((r) => rowToFileEntrySafe(r.entry)).filter((e): e is FileEntry => e !== null)
+  }
+
+  listAllIds(): Set<FileEntryId> {
+    const rows = this.getDb().select({ id: fileEntryTable.id }).from(fileEntryTable).all()
     return new Set(rows.map((r) => r.id))
   }
 
-  async create(values: CreateFileEntryRow): Promise<FileEntry> {
-    return this.withWriteTx((tx) => this.createTx(tx, values))
+  create(values: CreateFileEntryRow): FileEntry {
+    return this.createTx(this.getDb(), values)
   }
 
-  async createTx(tx: DbOrTx, values: CreateFileEntryRow): Promise<FileEntry> {
+  createTx(tx: DbOrTx, values: CreateFileEntryRow): FileEntry {
     const parsed = CreateFileEntryRowSchema.parse(values)
     const now = Date.now()
     const id = parsed.origin === 'internal' ? parsed.id : uuidv7()
-    const rows = await tx
+    const rows = tx
       .insert(fileEntryTable)
       .values({
         id,
         origin: parsed.origin,
         name: parsed.name,
         ext: parsed.ext,
+        cleanupPolicy: parsed.cleanupPolicy,
         size: parsed.origin === 'internal' ? parsed.size : null,
+        contentHash: parsed.origin === 'internal' ? (parsed.contentHash ?? null) : null,
         externalPath: parsed.origin === 'external' ? parsed.externalPath : null,
         deletedAt: null,
         createdAt: now,
         updatedAt: now
       })
       .returning()
+      .all()
     return rowToFileEntry(rows[0])
   }
 
-  async update(id: FileEntryId, values: UpdateFileEntryRow): Promise<FileEntry> {
-    return this.withWriteTx((tx) => this.updateTx(tx, id, values))
+  update(id: FileEntryId, values: UpdateFileEntryRow): FileEntry {
+    return this.updateTx(this.getDb(), id, values)
   }
 
-  async updateTx(tx: DbOrTx, id: FileEntryId, values: UpdateFileEntryRow): Promise<FileEntry> {
+  updateTx(tx: DbOrTx, id: FileEntryId, values: UpdateFileEntryRow): FileEntry {
     // Validate user-controlled string columns BEFORE the SQL UPDATE so a
     // rejected value never persists. Without this, a name / ext failing
     // the FileEntry field schemas commits to SQLite first and only fails at
@@ -563,14 +804,32 @@ class FileEntryServiceImpl implements FileEntryService {
     // un-parseable.
     if (values.name !== undefined) SafeNameSchema.parse(values.name)
     if (values.ext !== undefined) InternalEntrySchema.shape.ext.parse(values.ext)
+    if (values.cleanupPolicy !== undefined) CleanupPolicySchema.parse(values.cleanupPolicy)
+    // Enforce the one-way cleanup-policy invariant at the write site
+    // (file-entry-cleanup.md §4.2): a runtime `manual` -> `delete_when_unreferenced`
+    // transition does not exist. It is load-bearing — removing the volume safety
+    // abort (§5.3) was justified *by* it, so nothing downstream would catch a
+    // violation: the demoted entry simply becomes a GC candidate and a user
+    // library file is deleted. Until now it rested entirely on the single caller
+    // (`create.ts`, upgrade-only) staying disciplined. Rejecting here makes it
+    // structural, so a future main-side caller cannot demote by accident.
+    if (values.cleanupPolicy === 'delete_when_unreferenced') {
+      const current = this.findByIdTx(tx, id)
+      if (current?.cleanupPolicy === 'manual') {
+        throw DataApiErrorFactory.invalidOperation(
+          'update FileEntry',
+          `cleanupPolicy cannot be demoted from 'manual' to 'delete_when_unreferenced' (${id})`
+        )
+      }
+    }
     const updates: Partial<typeof fileEntryTable.$inferInsert> = {
       updatedAt: Date.now()
     }
     if (values.name !== undefined) updates.name = values.name
     if (values.ext !== undefined) updates.ext = values.ext
-    if (values.size !== undefined) updates.size = values.size
+    if (values.cleanupPolicy !== undefined) updates.cleanupPolicy = values.cleanupPolicy
     if (values.deletedAt !== undefined) updates.deletedAt = values.deletedAt
-    const rows = await tx.update(fileEntryTable).set(updates).where(eq(fileEntryTable.id, id)).returning()
+    const rows = tx.update(fileEntryTable).set(updates).where(eq(fileEntryTable.id, id)).returning().all()
     if (rows.length === 0) {
       throw DataApiErrorFactory.notFound('FileEntry', id)
     }
@@ -582,41 +841,65 @@ class FileEntryServiceImpl implements FileEntryService {
    * the only sanctioned mutation site for `externalPath`. Used by the rename
    * flow so the (path, name) pair stays consistent under failure.
    */
-  async setExternalPathAndName(id: FileEntryId, externalPath: CanonicalExternalPath, name: string): Promise<FileEntry> {
-    return this.withWriteTx((tx) => this.setExternalPathAndNameTx(tx, id, externalPath, name))
+  setExternalPathAndName(id: FileEntryId, externalPath: CanonicalFilePath, name: string): FileEntry {
+    return this.setExternalPathAndNameTx(this.getDb(), id, externalPath, name)
   }
 
-  async setExternalPathAndNameTx(
-    tx: DbOrTx,
-    id: FileEntryId,
-    externalPath: CanonicalExternalPath,
-    name: string
-  ): Promise<FileEntry> {
-    // Same pre-SQL validation rationale as `update` above; an unsafe value
-    // for either column would corrupt the row past `rowToFileEntry` parse.
-    // The `CanonicalExternalPath` brand is TS-only — defense-in-depth at the
-    // runtime layer rejects path strings the brand failed to flag (e.g. a
-    // caller that `as`-cast a raw user string instead of going through
-    // `canonicalizeExternalPath`).
+  setExternalPathAndNameTx(tx: DbOrTx, id: FileEntryId, externalPath: CanonicalFilePath, name: string): FileEntry {
+    // Same pre-SQL validation rationale as `update` above; an unsafe `name`
+    // would corrupt the row past `rowToFileEntry` parse. `externalPath` needs
+    // no full re-canonicalization here: the `CanonicalFilePath` brand can only
+    // be produced by `canonicalizeFilePath()`, so callers already proved
+    // canonicalization at construction time. The null-byte check below is
+    // cheap defense-in-depth against a forged `as CanonicalFilePath` cast
+    // (e.g. from the lint-exempt `watcher/**` / `tree/**` regimes) that would
+    // otherwise persist a poison value SQLite happily stores but that later
+    // makes the row unreadable once `canonicalizeAbsolutePath` throws on it.
     SafeNameSchema.parse(name)
-    AbsolutePathSchema.parse(externalPath)
-    const rows = await tx
+    if (externalPath.includes('\0')) {
+      throw new Error('setExternalPathAndNameTx: externalPath contains a null byte')
+    }
+    const rows = tx
       .update(fileEntryTable)
       .set({ externalPath, name, updatedAt: Date.now() })
       .where(eq(fileEntryTable.id, id))
       .returning()
+      .all()
     if (rows.length === 0) {
       throw DataApiErrorFactory.notFound('FileEntry', id)
     }
     return rowToFileEntry(rows[0])
   }
 
-  async delete(id: FileEntryId): Promise<void> {
-    await this.withWriteTx((tx) => this.deleteTx(tx, id))
+  delete(id: FileEntryId): void {
+    this.deleteTx(this.getDb(), id)
   }
 
-  async deleteTx(tx: DbOrTx, id: FileEntryId): Promise<void> {
-    await tx.delete(fileEntryTable).where(eq(fileEntryTable.id, id))
+  deleteTx(tx: DbOrTx, id: FileEntryId): void {
+    tx.delete(fileEntryTable).where(eq(fileEntryTable.id, id)).run()
+  }
+
+  purgeExpiredTx(tx: DbOrTx, cutoffMs: number, limit: number): FileEntryId[] {
+    const rows = tx
+      .select({ id: fileEntryTable.id })
+      .from(fileEntryTable)
+      .where(
+        and(
+          isNotNull(fileEntryTable.deletedAt),
+          lt(fileEntryTable.deletedAt, cutoffMs),
+          // A trashed file can still back a live painting or message — the ref rows
+          // FK-cascade, so purging here would strip the image out from under it.
+          // It stays in the trash until the last holder is gone.
+          ...persistentRefAbsenceConditions()
+        )
+      )
+      .limit(limit)
+      .all()
+    const ids = rows.map((row) => row.id)
+    if (ids.length === 0) return ids
+
+    tx.delete(fileEntryTable).where(inArray(fileEntryTable.id, ids)).run()
+    return ids
   }
 }
 

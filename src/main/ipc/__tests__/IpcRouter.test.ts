@@ -1,8 +1,9 @@
-import { defineRoute } from '@shared/ipc/define'
-import { IpcError } from '@shared/ipc/errors'
-import type { IpcContext, IpcHandlersFor } from '@shared/ipc/types'
 import { describe, expect, it, vi } from 'vitest'
 import * as z from 'zod'
+
+import { defineRoute } from '@shared/ipc/define'
+import { IpcError } from '@shared/ipc/errors/IpcError'
+import type { IpcContext, IpcHandlersFor } from '@shared/ipc/types'
 
 import { IpcRouter } from '../IpcRouter'
 

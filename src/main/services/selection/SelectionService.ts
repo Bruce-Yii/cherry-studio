@@ -1,11 +1,3 @@
-import { application } from '@application'
-import { loggerService } from '@logger'
-import { createLatestReconciler, type LatestReconciler } from '@main/core/concurrency/latestReconciler'
-import { type Activatable, BaseService, Injectable, Phase, ServicePhase } from '@main/core/lifecycle'
-import { isDev, isLinux, isMac, isWin } from '@main/core/platform'
-import { WindowType } from '@main/core/window/types'
-import type { SelectionActionItem } from '@shared/data/preference/preferenceTypes'
-import { SelectionTriggerMode } from '@shared/data/preference/preferenceTypes'
 import type { BrowserWindow } from 'electron'
 import { app, clipboard, screen, systemPreferences } from 'electron'
 import type {
@@ -15,6 +7,16 @@ import type {
   SelectionHookInstance,
   TextSelectionData
 } from 'selection-hook'
+
+import { application } from '@application'
+import { loggerService } from '@logger'
+import { createLatestReconciler, type LatestReconciler } from '@main/core/concurrency/latestReconciler'
+import { type Activatable, BaseService, Injectable, Phase, ServicePhase } from '@main/core/lifecycle'
+import { isDev, isLinux, isMac, isWin } from '@main/core/platform'
+import { WindowType } from '@main/core/window/types'
+import { getApplicationId } from '@main/utils/appEdition'
+import type { SelectionActionItem } from '@shared/data/preference/preferenceTypes'
+import { SelectionTriggerMode } from '@shared/data/preference/preferenceTypes'
 
 import { SELECTION_FINETUNED_LIST, SELECTION_PREDEFINED_BLACKLIST } from './selectionConfig'
 
@@ -284,9 +286,23 @@ export class SelectionService extends BaseService implements Activatable {
     this.registerDisposable({
       dispose: preferenceService.subscribeChange('feature.selection.enabled', (enabled: boolean) => {
         this.desiredEnabled = enabled
+        // The reconciler can settle without running deactivate()/onActivate() (disable while
+        // never activated; rapid false→true), so keep the pool in sync directly here.
+        // Both calls are idempotent.
+        if (!enabled) {
+          wm.suspendPool(WindowType.SelectionAction)
+        } else if (this.isActivated) {
+          wm.resumePool(WindowType.SelectionAction)
+        }
         this.reconciler.request()
       })
     })
+
+    // The pool is warmup:'eager' — suspend before allReady so the warmup skips it while the
+    // feature is off; onActivate()'s resumePool() re-enables it.
+    if (!preferenceService.get('feature.selection.enabled')) {
+      wm.suspendPool(WindowType.SelectionAction)
+    }
   }
 
   protected onAllReady(): void {
@@ -487,7 +503,7 @@ export class SelectionService extends BaseService implements Activatable {
    * Toggle the enabled state of the selection service
    * Will sync the new enabled store to all renderer windows
    */
-  public toggleEnabled(enabled: boolean | undefined = undefined): void {
+  public toggleEnabled(enabled?: boolean): void {
     const preferenceService = application.get('PreferenceService')
     const newEnabled = enabled === undefined ? !preferenceService.get('feature.selection.enabled') : enabled
 
@@ -583,8 +599,10 @@ export class SelectionService extends BaseService implements Activatable {
       y: posY
     })
 
-    // setAlwaysOnTop(true, 'screen-saver') is re-applied by the macReapplyAlwaysOnTop
-    // quirk after every show()/showInactive() call (see WindowManager.applyQuirks).
+    // setAlwaysOnTop(true, 'screen-saver') is re-applied on every platform by the
+    // reapplyAlwaysOnTop quirk after each show()/showInactive() call (see
+    // WindowManager.applyQuirks) — on Windows that re-assert is what keeps the
+    // toolbar above third-party topmost windows.
 
     if (!isMac) {
       this.toolbarWindow!.show()
@@ -608,7 +626,7 @@ export class SelectionService extends BaseService implements Activatable {
     // [macOS] a hacky way
     // when set `skipTransformProcessType: true`, if the selection is in self app, it will make the selection canceled after toolbar showing
     // so we just don't set `skipTransformProcessType: true` when in self app
-    const isSelf = ['com.github.Electron', 'com.cherryai.cherrystudio'].includes(programName)
+    const isSelf = ['com.github.Electron', getApplicationId()].includes(programName)
 
     if (!isSelf) {
       // [macOS] an ugly hacky way
@@ -1448,10 +1466,10 @@ export class SelectionService extends BaseService implements Activatable {
     }
   }
 
-  public writeToClipboard(text: string): boolean {
+  public async writeToClipboard(text: string): Promise<boolean> {
     if (isLinux) {
       try {
-        clipboard.writeText(text)
+        await clipboard.writeText(text)
         return true
       } catch (error) {
         logger.error('Failed to write to clipboard on Linux:', error as Error)

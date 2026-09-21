@@ -1,15 +1,18 @@
+import type EventEmitter from 'events'
+
 import type {
   OAuthClientInformation,
   OAuthClientInformationMixed,
   OAuthTokens
 } from '@modelcontextprotocol/sdk/shared/auth.js'
-import type EventEmitter from 'events'
 import * as z from 'zod'
 
 export interface OAuthStorageData {
   clientInfo?: OAuthClientInformation
   tokens?: OAuthTokens
   codeVerifier?: string
+  /** Authorization server the stored client was registered against, used to detect auth-server migrations */
+  authServerUrl?: string
   lastUpdated: number
 }
 
@@ -17,6 +20,7 @@ export const OAuthStorageSchema = z.object({
   clientInfo: z.any().optional(),
   tokens: z.any().optional(),
   codeVerifier: z.string().optional(),
+  authServerUrl: z.string().optional(),
   lastUpdated: z.number()
 })
 
@@ -27,6 +31,8 @@ export interface IOAuthStorage {
   saveTokens(tokens: OAuthTokens | undefined): Promise<void>
   getCodeVerifier(): Promise<string>
   saveCodeVerifier(codeVerifier: string): Promise<void>
+  getAuthServerUrl(): Promise<string | undefined>
+  saveAuthServerUrl(url: string | undefined): Promise<void>
   clear(): Promise<void>
 }
 

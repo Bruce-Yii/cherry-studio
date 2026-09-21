@@ -1,7 +1,10 @@
-import { FILE_TYPE, type FileMetadata, type FileType } from '@renderer/types/file'
-import { GB, KB, MB } from '@shared/utils/constants'
-import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/utils/file'
 import mime from 'mime-types'
+
+import { ipcApi } from '@renderer/ipc'
+import { FILE_TYPE, type FileMetadata, type FileType } from '@renderer/types/file'
+import { AbsoluteFilePathSchema } from '@shared/types/file'
+import { GB, KB, MB } from '@shared/utils/constants'
+import { audioExts, createFilePathHandle, documentExts, imageExts, textExts, videoExts } from '@shared/utils/file'
 
 /**
  * 从文件路径中提取目录路径。
@@ -90,7 +93,8 @@ export async function isSupportedFile(filePath: string, supportExts: Set<string>
       return true
     }
 
-    if (await window.api.file.isTextFile(filePath)) {
+    const meta = await ipcApi.request('file.get_metadata', createFilePathHandle(AbsoluteFilePathSchema.parse(filePath)))
+    if (meta?.kind === 'file' && meta.type === 'text') {
       return true
     }
 

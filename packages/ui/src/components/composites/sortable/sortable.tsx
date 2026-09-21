@@ -1,4 +1,3 @@
-import { cn } from '@cherrystudio/ui/lib/utils'
 import type {
   Active,
   CollisionDetection,
@@ -33,6 +32,8 @@ import {
 } from '@dnd-kit/sortable'
 import React, { useCallback, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
+
+import { cn } from '@cherrystudio/ui/lib/utils'
 
 import { ItemRenderer } from './item-renderer'
 import { SortableItem } from './sortable-item'
@@ -90,6 +91,17 @@ interface SortableProps<T> {
   }
   /** Additional modifiers */
   modifiers?: Modifier[]
+  /**
+   * Route the drag activator to a dedicated handle instead of the whole row.
+   * `renderItem` then receives `dragHandleProps` to spread onto the handle element,
+   * keeping the row itself non-interactive (better for nested controls / a11y).
+   */
+  dragHandle?: boolean
+  /**
+   * Forwarded to dnd-kit's `DndContext` — pass localized `announcements` and
+   * `screenReaderInstructions` so drag feedback isn't the default English + item id.
+   */
+  accessibility?: React.ComponentProps<typeof DndContext>['accessibility']
 }
 
 function Sortable<T>({
@@ -112,7 +124,9 @@ function Sortable<T>({
   itemStyle,
   gap,
   restrictions,
-  modifiers: customModifiers
+  modifiers: customModifiers,
+  dragHandle = false,
+  accessibility
 }: SortableProps<T>) {
   const sensors = useSensors(
     useSensor(PortalSafePointerSensor, {
@@ -203,7 +217,8 @@ function Sortable<T>({
       onDragEnd={handleDragEnd}
       onDragCancel={handleDragCancel}
       collisionDetection={collisionDetection}
-      modifiers={modifiers}>
+      modifiers={modifiers}
+      accessibility={accessibility}>
       <SortableContext items={itemIds} strategy={strategy}>
         <div
           className={cn(
@@ -226,6 +241,7 @@ function Sortable<T>({
               useDragOverlay={useDragOverlay}
               showGhost={showGhost}
               itemStyle={itemStyle}
+              dragHandle={dragHandle}
             />
           ))}
         </div>

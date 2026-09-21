@@ -1,10 +1,17 @@
+---
+description: Entry point for IpcApi docs — subsystem boundary, naming quick reference, migration status, and doc navigation
+sources:
+  - src/main/ipc
+  - src/shared/ipc
+---
+
 # IpcApi Reference
 
 Entry point for **IpcApi** — Cherry Studio's unified, type-safe channel for RPC-over-IPC: command/capability calls from the renderer into the main process, plus typed main→renderer events.
 
 IpcApi is the **fifth parallel subsystem** alongside BootConfig / Cache / Preference / DataApi. It does **not** absorb any of them — it collects the "business capability IPC" those four cannot cover (window/system/shell/notification/external-service/file commands).
 
-> **Status:** the Stage-0 framework (schema mechanism, `IpcRouter`, `IpcApiService`, preload forwarder, renderer facade, `useIpcOn`) has shipped and coexists with legacy IPC. No business channel is migrated yet; domains are migrated incrementally, one PR per domain (see the migration guide).
+> **Status:** the framework and most business domains have shipped. `src/shared/IpcChannel.ts` still contains the DataApi/Preference/Cache transports plus legacy app, backup, file, LAN-transfer, Copilot, and small-domain channels, as well as the deliberate `Tab_MoveWindow` and Python reverse-RPC carve-outs. Retiring those remaining legacy entries, moving the transport constants under `ipc/`, and narrowing `window.electron` are still pending.
 
 ## Quick Navigation
 
@@ -33,8 +40,8 @@ Decision rule: SQLite data → DataApi; user setting → Preference; losable/sha
 | Channels | `IpcApi_Request` (`ipc-api:request`) / `IpcApi_Event` (`ipc-api:event`) |
 | Main coordinator | `IpcApiService` (`request` dispatch + `broadcast`/`send`) |
 | Preload bridge | `window.api.ipcApi` (`{ request, on }`) |
-| Renderer facade | `ipcApi` (`ipcApi.request('window.set_minimum_size', x)`) + `useIpcOn` |
-| Route / event names | dot **snake_case** (`file.read_doc`, `window.resized`); payload fields stay camelCase |
+| Renderer facade | `ipcApi` (`ipcApi.request('window.main.set_minimum_size', x)`) + `useIpcOn` |
+| Route / event names | dot **snake_case**, any depth ≥ 2 (`file.read_doc`, `ai.agent.task.create`); resource path first, verb last; payload fields stay camelCase |
 | Request schemas | `*RequestSchemas` → `ipcRequestSchemas` / `IpcRoute` |
 | Event contracts (pure types) | `*EventSchemas` → `IpcEventSchemas` / `IpcEventName` |
 | Router / handlers / error | `IpcRouter` / `ipcHandlers` / `IpcError` |
@@ -45,14 +52,14 @@ Decision rule: SQLite data → DataApi; user setting → Preference; losable/sha
 | File | Role |
 |---|---|
 | `src/shared/ipc/define.ts` | `defineRoute` + `RouteDef` |
-| `src/shared/ipc/schemas/index.ts` | `ipcRequestSchemas` / `IpcRoute` / `IpcEventSchemas` / `IpcEventName` |
+| `src/shared/ipc/schemas/ipcSchemas.ts` | `ipcRequestSchemas` / `IpcRoute` / `IpcEventSchemas` / `IpcEventName` |
 | `src/shared/ipc/types.ts` | `InputFor` / `OutputFor` / `EventPayload` / `IpcHandlersFor` / `IpcContext` / `WindowId` |
-| `src/shared/ipc/errors/index.ts` | framework core: `IpcError` / `IpcErrorCode` (framework codes, single source of truth) / `SerializedIpcError` / `IpcResult` |
-| `src/shared/ipc/errors/<domain>.ts` | per-domain error-code maps (`as const`), imported directly by handler + renderer — **not** aggregated through `errors/index.ts` |
+| `src/shared/ipc/errors/IpcError.ts` | framework core: `IpcError` / `IpcErrorCode` (framework codes, single source of truth) / `SerializedIpcError` / `IpcResult` |
+| `src/shared/ipc/errors/<domain>.ts` | per-domain error-code maps (`as const`), imported directly by handler + renderer — `errors/` has no aggregating barrel |
 | `src/main/ipc/IpcRouter.ts` | request router (key lookup + zod parse + dispatch) |
 | `src/main/ipc/IpcApiService.ts` | `BeforeReady` coordinator: handler registration + `broadcast`/`send` |
-| `src/main/ipc/validateSender.ts` | source-trust gate (`validateSender` / `isTrustedSenderUrl`) |
-| `src/main/ipc/handlers/index.ts` | global `ipcHandlers` (exhaustive, the audited exposure surface) |
+| `src/main/core/security/validateSender.ts` | source-trust gate (`validateSender` / `isAppRendererUrl`), shared with the DataApi `IpcAdapter`, the Preference/Cache subsystem handlers, and the `will-navigate` guards |
+| `src/main/ipc/handlers/ipcHandlers.ts` | global `ipcHandlers` (exhaustive, the audited exposure surface) |
 | `src/preload/ipc.ts` | generic forwarder → `window.api.ipcApi` |
 | `src/renderer/ipc/index.ts` | typed facade `ipcApi` |
 | `src/renderer/ipc/useIpcOn.ts` | event subscription hook |

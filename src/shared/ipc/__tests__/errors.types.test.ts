@@ -1,13 +1,13 @@
 import { describe, expectTypeOf, it } from 'vitest'
 
-import { IpcErrorCode } from '../errors'
+import { IpcErrorCode } from '../errors/IpcError'
 
 /**
  * Type-level contract for the open error-code enum. Runtime values are covered in
  * errors.test.ts; these assertions lock the *type* shape B3 exists to provide — an
  * open union (domain codes welcome) whose framework members keep their literals.
  *
- * Enforced by `pnpm typecheck` (tsgo); vitest's esbuild path does not check types.
+ * Enforced by `pnpm typecheck` (tsc); vitest's esbuild path does not check types.
  */
 describe('IpcErrorCode open-enum type contract', () => {
   it('keeps the union open: an arbitrary domain code is assignable', () => {

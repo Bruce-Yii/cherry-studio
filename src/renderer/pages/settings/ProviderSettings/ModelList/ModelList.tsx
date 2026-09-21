@@ -1,30 +1,45 @@
-import { ButtonGroup } from '@cherrystudio/ui'
 import React, { memo } from 'react'
 
+import { ButtonGroup } from '@cherrystudio/ui'
+
 import { modelListClasses } from '../primitives/ProviderSettingsPrimitives'
-import { useModelListHealth } from './modelListHealthContext'
+import { useModelListHealthRun } from './modelListHealthContext'
 import ProviderModelAdd from './ProviderModelAdd'
 import ProviderModelDownload from './ProviderModelDownload'
-import ProviderModelHealthCheck from './ProviderModelHealthCheck'
 import ProviderModelList from './ProviderModelList'
 import ProviderModelPullReconcile from './ProviderModelPullReconcile'
 
 interface ModelListProps {
   providerId: string
+  modelPullGuideVersion?: number
+  onContinueApiSetup?: () => void
 }
 
-function ModelListContent({ providerId }: { providerId: string }) {
-  const health = useModelListHealth()
-  const disabled = health.isHealthChecking
+function ModelListContent({
+  providerId,
+  modelPullGuideVersion = 0,
+  onContinueApiSetup
+}: {
+  providerId: string
+  modelPullGuideVersion?: number
+  onContinueApiSetup?: () => void
+}) {
+  const { isModelChecking } = useModelListHealthRun()
+  const disabled = isModelChecking
 
   return (
     <>
       <ProviderModelList
         providerId={providerId}
         disabled={disabled}
+        onContinueApiSetup={onContinueApiSetup}
         actions={({ disabled: toolbarDisabled }) => (
           <ButtonGroup className={modelListClasses.toolbarButtonGroup}>
-            <ProviderModelPullReconcile providerId={providerId} disabled={toolbarDisabled} />
+            <ProviderModelPullReconcile
+              providerId={providerId}
+              disabled={toolbarDisabled}
+              guideVersion={modelPullGuideVersion}
+            />
             {providerId === 'ovms' ? (
               <ProviderModelDownload providerId={providerId} disabled={toolbarDisabled} />
             ) : (
@@ -33,16 +48,19 @@ function ModelListContent({ providerId }: { providerId: string }) {
           </ButtonGroup>
         )}
       />
-      <ProviderModelHealthCheck disabled={disabled} hasVisibleModels={false} renderTrigger={false} />
     </>
   )
 }
 
-const ModelList: React.FC<ModelListProps> = ({ providerId }) => {
+const ModelList: React.FC<ModelListProps> = ({ providerId, modelPullGuideVersion = 0, onContinueApiSetup }) => {
   return (
     <div className={modelListClasses.cqRoot}>
       <section data-testid="provider-model-list" className={modelListClasses.section}>
-        <ModelListContent providerId={providerId} />
+        <ModelListContent
+          providerId={providerId}
+          modelPullGuideVersion={modelPullGuideVersion}
+          onContinueApiSetup={onContinueApiSetup}
+        />
       </section>
     </div>
   )

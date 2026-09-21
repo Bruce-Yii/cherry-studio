@@ -1,5 +1,6 @@
-import type { FilePath } from '@shared/types/file'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { AbsoluteFilePath } from '@shared/types/file'
 
 const { assertSafePathForDefaultOpenMock, internalOpenMock, internalShowInFolderMock } = vi.hoisted(() => ({
   assertSafePathForDefaultOpenMock: vi.fn(),
@@ -24,7 +25,7 @@ describe('file system helpers', () => {
   })
 
   it('safeOpen checks default-open safety before opening the path', async () => {
-    await safeOpen('/tmp/report.md' as FilePath)
+    await safeOpen('/tmp/report.md' as AbsoluteFilePath)
 
     expect(assertSafePathForDefaultOpenMock).toHaveBeenCalledWith('/tmp/report.md')
     expect(internalOpenMock).toHaveBeenCalledWith('/tmp/report.md')
@@ -39,12 +40,12 @@ describe('file system helpers', () => {
       throw error
     })
 
-    await expect(safeOpen('/tmp/payload.cmd' as FilePath)).rejects.toBe(error)
+    await expect(safeOpen('/tmp/payload.cmd' as AbsoluteFilePath)).rejects.toBe(error)
     expect(internalOpenMock).not.toHaveBeenCalled()
   })
 
   it('showInFolder delegates to the internal shell primitive', async () => {
-    await showInFolder('/tmp/report.md' as FilePath)
+    await showInFolder('/tmp/report.md' as AbsoluteFilePath)
 
     expect(internalShowInFolderMock).toHaveBeenCalledWith('/tmp/report.md')
   })

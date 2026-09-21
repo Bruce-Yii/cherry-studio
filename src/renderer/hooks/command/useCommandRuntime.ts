@@ -1,8 +1,9 @@
+import { createContext, use, useEffect, useRef } from 'react'
+
 import { loggerService } from '@logger'
 import type { PreferenceShortcutType } from '@shared/data/preference/preferenceTypes'
 import type { MenuPresentationMode } from '@shared/types/command'
 import type { CommandId } from '@shared/utils/command'
-import { createContext, use, useEffect, useRef } from 'react'
 
 const logger = loggerService.withContext('useCommandRuntime')
 
@@ -55,7 +56,7 @@ export function useCommandHandler(command: CommandId, handler: CommandHandler, o
  * provider (tests, isolated windows).
  *
  * Direct `useMultiplePreferences(shortcutPreferenceKeys)` calls multiply IPC
- * listeners per render — N consumers × ~18 keys froze the settings window.
+ * listeners per render — N consumers × ~18 keys overload the shared command runtime.
  */
 export function useCommandShortcutPreferences(): Partial<Record<CommandId, PreferenceShortcutType>> {
   return use(CommandSharedPreferencesContext)?.shortcutPreferences ?? EMPTY_SHORTCUT_PREFERENCES

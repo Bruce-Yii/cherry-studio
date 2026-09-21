@@ -2,8 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import type { PreferenceSchemas } from '../preferenceSchemas'
 import { DefaultPreferences } from '../preferenceSchemas'
+import { createSidebarShortcutId, type SidebarShortcutTarget } from '../preferenceTypes'
 
 describe('DefaultPreferences', () => {
+  it('leaves the client ID empty until runtime generates a UUID', () => {
+    expect(DefaultPreferences.default['app.user.id']).toBe('')
+  })
+
   it('uses flat file processing default keys', () => {
     const markdownConversionDefault: PreferenceSchemas['default']['feature.file_processing.default_document_to_markdown'] =
       null
@@ -28,9 +33,69 @@ describe('DefaultPreferences', () => {
     expect(DefaultPreferences.default['chat.web_search.default_search_keywords_provider']).toBe(searchKeywordsDefault)
   })
 
-  it('groups agent sessions by agent for new users', () => {
+  it('groups conversations and agent sessions by the assistant and agent defaults for new users', () => {
+    const topicDisplayDefault: PreferenceSchemas['default']['topic.tab.display_mode'] = 'assistant'
     const agentSessionDisplayDefault: PreferenceSchemas['default']['agent.session.display_mode'] = 'agent'
 
+    expect(DefaultPreferences.default['topic.tab.display_mode']).toBe(topicDisplayDefault)
     expect(DefaultPreferences.default['agent.session.display_mode']).toBe(agentSessionDisplayDefault)
+  })
+
+  it('preserves the legacy favorites shape independently of resource shortcut defaults', () => {
+    const legacyFavorites: PreferenceSchemas['default']['ui.sidebar.favorites'] = [
+      { type: 'app', id: 'agents' },
+      { type: 'app', id: 'assistants' },
+      { type: 'app', id: 'translate' },
+      { type: 'app', id: 'paintings' },
+      { type: 'app', id: 'knowledge' }
+    ]
+    expect(DefaultPreferences.default['ui.sidebar.favorites']).toEqual(legacyFavorites)
+
+    const sidebarShortcutsDefault: PreferenceSchemas['default']['ui.sidebar_shortcut'] = [
+      'agents',
+      'assistants',
+      'translate',
+      'paintings',
+      'knowledge'
+    ].map((resourceId) => {
+      const target: SidebarShortcutTarget = {
+        kind: 'resource',
+        locator: { providerId: 'core.app', resourceId }
+      }
+      return { type: 'shortcut', id: createSidebarShortcutId(target), target }
+    })
+
+    expect(DefaultPreferences.default['ui.sidebar_shortcut']).toEqual(sidebarShortcutsDefault)
+  })
+
+  it('pins permission mode on the agent composer toolbar for new users', () => {
+    const agentPinnedToolsDefault: PreferenceSchemas['default']['agent.input.toolbar.pinned_tools'] = [
+      'composer:new-session',
+      'skills',
+      'permission-mode'
+    ]
+
+    expect(DefaultPreferences.default['agent.input.toolbar.pinned_tools']).toEqual(agentPinnedToolsDefault)
+  })
+
+  it('defaults transparent windows on for new users', () => {
+    const windowStyleDefault: PreferenceSchemas['default']['ui.window_style'] = 'transparent'
+
+    expect(DefaultPreferences.default['ui.window_style']).toBe(windowStyleDefault)
+  })
+
+  it('defaults message navigation to the anchor rail for new users', () => {
+    const messageNavigationDefault: PreferenceSchemas['default']['chat.message.navigation_mode'] = 'anchor'
+
+    expect(DefaultPreferences.default['chat.message.navigation_mode']).toBe(messageNavigationDefault)
+  })
+
+  it('shows estimated input tokens by default for new users', () => {
+    expect(DefaultPreferences.default['chat.input.show_estimated_tokens']).toBe(true)
+  })
+
+  it('does not keep legacy classic/modern layout preferences', () => {
+    expect('topic.layout' in DefaultPreferences.default).toBe(false)
+    expect('agent.layout' in DefaultPreferences.default).toBe(false)
   })
 })

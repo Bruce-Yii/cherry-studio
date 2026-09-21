@@ -1,9 +1,10 @@
+import { type SQL, sql } from 'drizzle-orm'
+
 import { loggerService } from '@logger'
 import { stripMarkdownFormatting } from '@main/utils/searchSnippet'
-import { DataApiErrorFactory } from '@shared/data/api'
-import type { CursorPaginationResponse } from '@shared/data/api/apiTypes'
+import { DataApiErrorFactory } from '@shared/data/api/errors'
+import type { CursorPaginationResponse } from '@shared/data/api/types'
 import { buildKeywordRegexes, type KeywordMatchMode, splitKeywordsToTerms } from '@shared/utils/keywordSearch'
-import { type SQL, sql } from 'drizzle-orm'
 
 import { asNumericKey, encodeCursor, parseCursor } from './keysetCursor'
 
@@ -51,7 +52,7 @@ type SearchWithCursorOptions<Row, PublicItem> = {
   createdAtFrom?: string
   maxCandidates?: number
   cursorConfig: CursorConfig
-  fetchRows: (context: SearchFetchContext) => Promise<Row[]>
+  fetchRows: (context: SearchFetchContext) => Row[]
   getSearchableText: (row: Row) => string
   buildSnippet: BuildSnippet
   mapRow: (row: Row, context: SearchMapContext) => SearchMappedItem<PublicItem>
@@ -88,7 +89,7 @@ export function getCreatedAtFromMs(createdAtFrom: string | undefined): number | 
   return Number.isFinite(value) ? value : undefined
 }
 
-export async function searchWithCursor<Row, PublicItem>({
+export function searchWithCursor<Row, PublicItem>({
   q,
   limit = DEFAULT_FTS_SEARCH_LIMIT,
   cursor: rawCursor,
@@ -99,7 +100,7 @@ export async function searchWithCursor<Row, PublicItem>({
   getSearchableText,
   buildSnippet,
   mapRow
-}: SearchWithCursorOptions<Row, PublicItem>): Promise<CursorPaginationResponse<PublicItem>> {
+}: SearchWithCursorOptions<Row, PublicItem>): CursorPaginationResponse<PublicItem> {
   const terms = splitKeywordsToTerms(q)
   if (terms.length === 0) return { items: [] }
 
@@ -114,7 +115,7 @@ export async function searchWithCursor<Row, PublicItem>({
   let scannedCandidates = 0
 
   while (results.length < fetchLimit) {
-    const rows = await fetchRows({
+    const rows = fetchRows({
       ftsConditions,
       cursor,
       createdAtFromMs,

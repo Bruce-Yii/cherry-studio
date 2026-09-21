@@ -1,23 +1,27 @@
 /**
- * Entry lifecycle — trash / restore / permanentDelete + batch variants.
+ * Entry lifecycle — trash / restore / delete actions + batch variants.
  *
- * `trash` / `restore` are internal-only; passing an external id throws (the
- * `fe_external_no_delete` CHECK enforces this at the DB level for `trash`, and
- * `restore` uses an explicit early-throw because trashed external rows cannot
- * exist by definition).
+ * `trash` / `restore` are internal-only and state-conditional: only an active
+ * internal entry can be trashed, and only a trashed internal entry can be restored.
  *
- * `permanentDelete` is the single entry point that crosses DB and FS:
+ * The general `permanentDelete` operation crosses DB and FS:
  * - DB row removal is mandatory.
  * - For internal origin, the physical file is best-effort unlinked. Failure
  *   to unlink (already missing, permission denied, etc.) is logged but does
  *   not block DB deletion — the architecture doc prefers DB-FS convergence
  *   to "both gone" over "DB still has dangling row".
  * - For external origin, the user's file is **never** modified.
+ *
+ * Renderer-backed delete actions use narrower contracts:
+ * - `permanentDeleteFromTrash` accepts only unreferenced trashed internal rows.
+ * - `removeExternalFromLibrary` accepts only unreferenced external rows and
+ *   never removes their user-owned paths.
  */
 
 import type { DbOrTx } from '@data/db/types'
 import { loggerService } from '@logger'
-import { remove as fsRemove } from '@main/utils/file/fs'
+import { remove as fsRemove } from '@main/utils/file'
+import { DataApiErrorFactory } from '@shared/data/api/errors'
 import type { FileEntry, FileEntryId } from '@shared/data/types/file'
 import type { BatchMutationResult } from '@shared/types/file'
 
@@ -26,18 +30,22 @@ import type { FileManagerDeps } from '../deps'
 
 const logger = loggerService.withContext('internal/entry/lifecycle')
 
-async function trashTx(deps: FileManagerDeps, tx: DbOrTx, id: FileEntryId): Promise<void> {
-  await deps.fileEntryService.updateTx(tx, id, { deletedAt: Date.now() })
+function trashTx(deps: FileManagerDeps, tx: DbOrTx, id: FileEntryId): void {
+  const entry = deps.fileEntryService.getByIdTx(tx, id)
+  if (entry.origin !== 'internal' || entry.deletedAt != null) {
+    throw DataApiErrorFactory.notFound('FileEntry', id)
+  }
+  deps.fileEntryService.updateTx(tx, id, { deletedAt: Date.now() })
 }
 
-export async function trash(deps: FileManagerDeps, id: FileEntryId): Promise<void> {
-  await deps.fileEntryService.withWriteTx((tx) => trashTx(deps, tx, id))
+export function trash(deps: FileManagerDeps, id: FileEntryId): void {
+  deps.fileEntryService.withWriteTx((tx) => trashTx(deps, tx, id))
 }
 
-async function restoreTx(deps: FileManagerDeps, tx: DbOrTx, id: FileEntryId): Promise<FileEntry> {
-  const entry = await deps.fileEntryService.getByIdTx(tx, id)
-  if (entry.origin === 'external') {
-    throw new Error(`restore: external entry ${id} cannot be trashed by definition; nothing to restore`)
+function restoreTx(deps: FileManagerDeps, tx: DbOrTx, id: FileEntryId): FileEntry {
+  const entry = deps.fileEntryService.getByIdTx(tx, id)
+  if (entry.origin !== 'internal' || entry.deletedAt == null) {
+    throw DataApiErrorFactory.notFound('FileEntry', id)
   }
   return deps.fileEntryService.updateTx(tx, id, { deletedAt: null })
 }
@@ -46,13 +54,13 @@ export async function restore(deps: FileManagerDeps, id: FileEntryId): Promise<F
   return deps.fileEntryService.withWriteTx((tx) => restoreTx(deps, tx, id))
 }
 
-async function permanentDeleteTx(deps: FileManagerDeps, tx: DbOrTx, id: FileEntryId): Promise<FileEntry> {
-  const entry = await deps.fileEntryService.getByIdTx(tx, id)
-  await deps.fileEntryService.deleteTx(tx, id)
+function permanentDeleteTx(deps: FileManagerDeps, tx: DbOrTx, id: FileEntryId): FileEntry {
+  const entry = deps.fileEntryService.getByIdTx(tx, id)
+  deps.fileEntryService.deleteTx(tx, id)
   return entry
 }
 
-async function cleanupDeletedEntry(deps: FileManagerDeps, entry: FileEntry): Promise<void> {
+export async function cleanupDeletedEntry(deps: FileManagerDeps, entry: FileEntry): Promise<{ unlinkFailed: boolean }> {
   const physical = entry.origin === 'internal' ? resolvePhysicalPath(entry) : undefined
   deps.versionCache.invalidate(entry.id)
   if (entry.origin === 'external') {
@@ -72,26 +80,67 @@ async function cleanupDeletedEntry(deps: FileManagerDeps, entry: FileEntry): Pro
         physical,
         err
       })
+      return { unlinkFailed: true }
     }
   }
+  return { unlinkFailed: false }
 }
 
 export async function permanentDelete(deps: FileManagerDeps, id: FileEntryId): Promise<void> {
-  const entry = await deps.fileEntryService.withWriteTx((tx) => permanentDeleteTx(deps, tx, id))
+  const entry = deps.fileEntryService.withWriteTx((tx) => permanentDeleteTx(deps, tx, id))
   await cleanupDeletedEntry(deps, entry)
 }
 
-async function aggregateWriteTx<T>(
+function assertUnreferenced(deps: FileManagerDeps, tx: DbOrTx, id: FileEntryId, operation: string): void {
+  if (deps.fileRefService.countPersistentRefsByEntryIdTx(tx, id) > 0) {
+    throw DataApiErrorFactory.invalidOperation(operation, `File entry ${id} is still referenced`)
+  }
+}
+
+function permanentDeleteFromTrashTx(deps: FileManagerDeps, tx: DbOrTx, id: FileEntryId): FileEntry {
+  const entry = deps.fileEntryService.getByIdTx(tx, id)
+  if (entry.origin !== 'internal' || entry.deletedAt == null) {
+    throw DataApiErrorFactory.invalidOperation(
+      'permanently delete file from Trash',
+      `File entry ${id} must be an internal file in the Recycle Bin`
+    )
+  }
+  assertUnreferenced(deps, tx, id, 'permanently delete file from Trash')
+  deps.fileEntryService.deleteTx(tx, id)
+  return entry
+}
+
+export async function permanentDeleteFromTrash(deps: FileManagerDeps, id: FileEntryId): Promise<void> {
+  const entry = deps.fileEntryService.withWriteTx((tx) => permanentDeleteFromTrashTx(deps, tx, id))
+  await cleanupDeletedEntry(deps, entry)
+}
+
+function removeExternalFromLibraryTx(deps: FileManagerDeps, tx: DbOrTx, id: FileEntryId): FileEntry {
+  const entry = deps.fileEntryService.getByIdTx(tx, id)
+  if (entry.origin !== 'external') {
+    throw DataApiErrorFactory.invalidOperation('remove file from library', `File entry ${id} must be an external file`)
+  }
+  assertUnreferenced(deps, tx, id, 'remove file from library')
+  deps.fileEntryService.deleteTx(tx, id)
+  return entry
+}
+
+export async function removeExternalFromLibrary(deps: FileManagerDeps, id: FileEntryId): Promise<void> {
+  const entry = deps.fileEntryService.withWriteTx((tx) => removeExternalFromLibraryTx(deps, tx, id))
+  await cleanupDeletedEntry(deps, entry)
+}
+
+function aggregateWriteTx<T>(
   deps: FileManagerDeps,
   ids: readonly FileEntryId[],
-  op: (tx: DbOrTx, id: FileEntryId) => Promise<T>
-): Promise<BatchMutationResult> {
+  op: (tx: DbOrTx, id: FileEntryId) => T
+): BatchMutationResult {
   const succeeded: FileEntryId[] = []
   const failed: BatchMutationResult['failed'] = []
-  await deps.fileEntryService.withWriteTx(async (tx) => {
+  deps.fileEntryService.withWriteTx((tx) => {
     for (const id of ids) {
       try {
-        await op(tx, id)
+        op(tx, id)
         succeeded.push(id)
       } catch (err) {
         // Wire format only carries `.message` (string), so the stack is lost in
@@ -105,25 +154,42 @@ async function aggregateWriteTx<T>(
   return { succeeded, failed }
 }
 
-export function batchTrash(deps: FileManagerDeps, ids: readonly FileEntryId[]): Promise<BatchMutationResult> {
+export function batchTrash(deps: FileManagerDeps, ids: readonly FileEntryId[]): BatchMutationResult {
   return aggregateWriteTx(deps, ids, (tx, id) => trashTx(deps, tx, id))
 }
 
-export function batchRestore(deps: FileManagerDeps, ids: readonly FileEntryId[]): Promise<BatchMutationResult> {
+export function batchRestore(deps: FileManagerDeps, ids: readonly FileEntryId[]): BatchMutationResult {
   return aggregateWriteTx(deps, ids, (tx, id) => restoreTx(deps, tx, id))
 }
 
-export async function batchPermanentDelete(
+async function aggregatePerEntry(
+  ids: readonly FileEntryId[],
+  op: (id: FileEntryId) => Promise<void>
+): Promise<BatchMutationResult> {
+  const succeeded: FileEntryId[] = []
+  const failed: BatchMutationResult['failed'] = []
+  for (const id of ids) {
+    try {
+      await op(id)
+      succeeded.push(id)
+    } catch (err) {
+      logger.warn('batch op item failed', { id, err })
+      failed.push({ id, error: (err as Error).message })
+    }
+  }
+  return { succeeded, failed }
+}
+
+export function batchPermanentDeleteFromTrash(
   deps: FileManagerDeps,
   ids: readonly FileEntryId[]
 ): Promise<BatchMutationResult> {
-  const deletedEntries: FileEntry[] = []
-  const result = await aggregateWriteTx(deps, ids, async (tx, id) => {
-    const entry = await permanentDeleteTx(deps, tx, id)
-    deletedEntries.push(entry)
-  })
-  for (const entry of deletedEntries) {
-    await cleanupDeletedEntry(deps, entry)
-  }
-  return result
+  return aggregatePerEntry(ids, (id) => permanentDeleteFromTrash(deps, id))
+}
+
+export function batchRemoveFromLibrary(
+  deps: FileManagerDeps,
+  ids: readonly FileEntryId[]
+): Promise<BatchMutationResult> {
+  return aggregatePerEntry(ids, (id) => removeExternalFromLibrary(deps, id))
 }

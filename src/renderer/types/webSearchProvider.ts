@@ -1,9 +1,10 @@
 import type { LanguageModelV3Source } from '@ai-sdk/provider'
 import type { WebSearchResultBlock } from '@anthropic-ai/sdk/resources'
-import type OpenAI from '@cherrystudio/openai'
 import type { GroundingMetadata } from '@google/genai'
-import { objectValues } from '@renderer/utils/object'
 import * as z from 'zod'
+
+import type OpenAI from '@cherrystudio/openai'
+import { objectValues } from '@renderer/utils/object'
 
 export const WebSearchProviderIds = {
   zhipu: 'zhipu',
@@ -14,7 +15,8 @@ export const WebSearchProviderIds = {
   bocha: 'bocha',
   querit: 'querit',
   fetch: 'fetch',
-  jina: 'jina'
+  jina: 'jina',
+  firecrawl: 'firecrawl'
 } as const
 
 export type WebSearchProviderId = keyof typeof WebSearchProviderIds
@@ -28,7 +30,6 @@ export type WebSearchProvider = {
   url?: string
   basicAuthUsername?: string
   basicAuthPassword?: string
-  usingBrowser?: boolean
   topicId?: string
   allowedTools?: string[]
   parentSpanId?: string
@@ -46,7 +47,7 @@ export type WebSearchProviderResponse = {
   results: WebSearchProviderResult[]
 }
 
-export type AISDKWebSearchResult = Omit<Extract<LanguageModelV3Source, { sourceType: 'url' }>, 'sourceType'>
+export type AiSdkWebSearchResult = Omit<Extract<LanguageModelV3Source, { sourceType: 'url' }>, 'sourceType'>
 
 export type WebSearchResults =
   | WebSearchProviderResponse
@@ -54,7 +55,7 @@ export type WebSearchResults =
   | OpenAI.Chat.Completions.ChatCompletionMessage.Annotation.URLCitation[]
   | OpenAI.Responses.ResponseOutputText.URLCitation[]
   | WebSearchResultBlock[]
-  | AISDKWebSearchResult[]
+  | AiSdkWebSearchResult[]
   | any[]
 
 export const WEB_SEARCH_SOURCE = {

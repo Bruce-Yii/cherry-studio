@@ -1,8 +1,10 @@
-import { loggerService } from '@logger'
-import { ipcApi } from '@renderer/ipc'
-import type { WebSearchCapability, WebSearchProvider } from '@shared/data/preference/preferenceTypes'
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+
+import { loggerService } from '@logger'
+import { ipcApi } from '@renderer/ipc'
+import { toast } from '@renderer/services/toast'
+import type { WebSearchCapability, WebSearchProvider } from '@shared/data/preference/preferenceTypes'
 
 const logger = loggerService.withContext('useWebSearchProviderCheck')
 
@@ -40,13 +42,13 @@ export function useWebSearchProviderCheck({ provider, capability }: UseWebSearch
     return runCheck().then(
       () => {
         setChecking(false)
-        window.toast.success(t('settings.tool.websearch.check_success'))
+        toast.success(t('settings.tool.websearch.check_success'))
       },
       (error) => {
         setChecking(false)
         logger.error('Web search provider check failed', error as Error)
         const errorMessage = error instanceof Error ? error.message : String(error)
-        window.toast.error(`${t('settings.tool.websearch.check_failed')}: ${errorMessage}`)
+        toast.error(`${t('settings.tool.websearch.check_failed')}: ${errorMessage}`)
       }
     )
   }, [canCheck, capability, checking, provider.id, t])

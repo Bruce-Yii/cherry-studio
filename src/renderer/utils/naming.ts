@@ -1,6 +1,6 @@
-import i18n from '@renderer/i18n'
 import { getProviderLabelKey } from '@renderer/i18n/label'
-import { isSystemProvider, type Provider } from '@renderer/types/provider'
+import i18n from '@renderer/i18n/resolver'
+import { isSystemProvider, isSystemProviderId, type Provider } from '@renderer/types/provider'
 
 /**
  * 从模型 ID 中提取默认组名。
@@ -105,6 +105,24 @@ export const getLowerBaseModelName = (id: string, delimiter: string = '/'): stri
  */
 export const getFancyProviderName = (provider: Provider) => {
   return isSystemProvider(provider) ? i18n.t(getProviderLabelKey(provider.id)) : provider.name
+}
+
+/**
+ * Resolve the best provider label available from an id alone.
+ * Custom provider ids remain unchanged until provider metadata is available.
+ */
+export function getProviderDisplayNameById(providerId: string): string {
+  const labelKey = getProviderLabelKey(providerId, '')
+  return labelKey ? i18n.t(labelKey) : providerId
+}
+
+/**
+ * Resolve a provider's user-facing name from its runtime metadata.
+ * System providers use their canonical label; custom providers keep their user-set name.
+ */
+export function getProviderDisplayName(provider: Pick<Provider, 'id' | 'name'> | undefined): string {
+  if (!provider) return ''
+  return isSystemProviderId(provider.id) ? getProviderDisplayNameById(provider.id) : provider.name
 }
 
 // \uFE0F = VS16 (emoji-presentation selector); \u20E3 = combining enclosing keycap (1️⃣);
@@ -213,31 +231,6 @@ export function getBriefInfo(text: string, maxLength: number = 50): string {
 
   // 截取前面的内容，并在末尾添加 "..."
   return truncatedText + '...'
-}
-
-/**
- * 清理 provider 名称，用于环境变量名：
- * - 只保留 [a-zA-Z0-9_\s.-]（白名单）
- * - 空格转短横线（下游会把 - 和 . 再转 _）
- * - 清理后为空时用 hash 兜底
- * @param {string} name 输入字符串
- * @returns {string} 清理后的字符串
- */
-export function sanitizeProviderName(name: string): string {
-  if (!name) return name
-
-  const sanitized = name
-    .replace(/[^a-zA-Z0-9_\s.-]/g, '') // whitelist: only keep env-var-safe chars
-    .replace(/\s+/g, '-') // spaces -> dashes
-
-  if (!sanitized) {
-    let hash = 0
-    for (let i = 0; i < name.length; i++) {
-      hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0
-    }
-    return 'p_' + Math.abs(hash).toString(36)
-  }
-  return sanitized
 }
 
 /**

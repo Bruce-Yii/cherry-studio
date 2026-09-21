@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { FILE_TYPE, FileTypeSchema } from '../file'
+import { FILE_TYPE, FileTypeSchema } from '@shared/types/file'
 
 describe('FileTypeSchema', () => {
   it('accepts canonical file types', () => {

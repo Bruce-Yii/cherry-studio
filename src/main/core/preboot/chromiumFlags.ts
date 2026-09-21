@@ -1,6 +1,7 @@
+import { app } from 'electron'
+
 import { isLinux, isWin } from '@main/core/platform'
 import { bootConfigService } from '@main/data/bootConfig'
-import { app } from 'electron'
 
 /**
  * Configure Chromium startup flags — the umbrella term Electron uses for
@@ -55,9 +56,11 @@ export function configureChromiumFlags(): void {
   //   response header).
   // - EarlyEstablishGpuChannel + EstablishGpuChannelAsync: open the GPU IPC
   //   channel early to speed up first-paint.
+  // - PageAllocatorRetryOnCommitFailure: retry memory page commits under
+  //   transient commit pressure instead of failing immediately.
   // https://github.com/microsoft/vscode/pull/241640/files
   app.commandLine.appendSwitch(
     'enable-features',
-    'DocumentPolicyIncludeJSCallStacksInCrashReports,EarlyEstablishGpuChannel,EstablishGpuChannelAsync'
+    'DocumentPolicyIncludeJSCallStacksInCrashReports,EarlyEstablishGpuChannel,EstablishGpuChannelAsync,PageAllocatorRetryOnCommitFailure'
   )
 }

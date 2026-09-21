@@ -1,6 +1,7 @@
+import * as z from 'zod'
+
 import type OpenAI from '@cherrystudio/openai'
 import { objectValues } from '@renderer/utils/object'
-import * as z from 'zod'
 
 export const FILE_TYPE = {
   IMAGE: 'image',
@@ -89,8 +90,8 @@ export type PdfFileMetadata = FileMetadata & {
   ext: '.pdf'
 }
 
-export type { ImageFileMetadata } from '@shared/data/types/file/legacyFileMetadata'
-export { isImageFileMetadata } from '@shared/data/types/file/legacyFileMetadata'
+export type { ImageFileMetadata } from '@shared/data/types/legacyFile'
+export { isImageFileMetadata } from '@shared/data/types/legacyFile'
 
 export const isPastedTextFileMetadata = (file: unknown): file is PastedTextFileMetadata => {
   return (

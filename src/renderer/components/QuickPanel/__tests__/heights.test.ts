@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { getQuickPanelHeights, QUICK_PANEL_ITEM_HEIGHT } from '../heights'
+import { getQuickPanelBodyVerticalSpace, getQuickPanelHeights, QUICK_PANEL_ITEM_HEIGHT } from '../heights'
 
 const ITEM = QUICK_PANEL_ITEM_HEIGHT
 const DEFAULT_CHROME = 98
@@ -17,6 +17,21 @@ const base = {
 }
 
 describe('getQuickPanelHeights', () => {
+  it('accounts for the 34px rendered row plus its one-pixel inter-row gap', () => {
+    expect(QUICK_PANEL_ITEM_HEIGHT).toBe(35)
+  })
+
+  it('sums the rendered body padding and border widths', () => {
+    const style = {
+      paddingTop: '5px',
+      paddingBottom: '5px',
+      borderTopWidth: '0.5px',
+      borderBottomWidth: '0.5px'
+    } as CSSStyleDeclaration
+
+    expect(getQuickPanelBodyVerticalSpace(style)).toBe(11)
+  })
+
   describe('default (docked / non-fill): fixed height, ignores availableHeight', () => {
     it('uses the fixed ideal height when availableHeight is null', () => {
       const { panelMaxHeight, listHeight } = getQuickPanelHeights(base)
@@ -38,6 +53,34 @@ describe('getQuickPanelHeights', () => {
       expect(getQuickPanelHeights({ ...base, readOnly: true }).panelMaxHeight).toBe(
         base.pageSize * ITEM + READONLY_CHROME
       )
+    })
+
+    it('keeps a measured read-only footer visible when search results collapse', () => {
+      const measuredChrome = 82
+
+      expect(
+        getQuickPanelHeights({
+          ...base,
+          readOnly: true,
+          collapsed: true,
+          chromeHeight: measuredChrome
+        })
+      ).toEqual({ panelMaxHeight: measuredChrome, listHeight: 0 })
+    })
+
+    it('includes the rendered empty state when search results collapse', () => {
+      const measuredChrome = 82
+      const emptyStateHeight = 48
+
+      expect(
+        getQuickPanelHeights({
+          ...base,
+          readOnly: true,
+          collapsed: true,
+          chromeHeight: measuredChrome,
+          emptyStateHeight
+        })
+      ).toEqual({ panelMaxHeight: measuredChrome + emptyStateHeight, listHeight: 0 })
     })
   })
 

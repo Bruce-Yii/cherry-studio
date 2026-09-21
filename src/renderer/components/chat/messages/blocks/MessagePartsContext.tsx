@@ -5,9 +5,10 @@
  * Components read parts directly via useMessageParts / usePartsMap.
  */
 
-import type { TranslateLangCode } from '@shared/data/preference/preferenceTypes'
-import type { CherryMessagePart } from '@shared/data/types/message'
+import type { ReactNode } from 'react'
 import { createContext, use, useMemo } from 'react'
+
+import type { CherryMessagePart } from '@shared/data/types/message'
 
 // ============================================================================
 // Refresh Context — allows deep components to trigger data refresh
@@ -32,8 +33,46 @@ export function useRefresh(): () => void {
  */
 export const PartsContext = createContext<Record<string, CherryMessagePart[]> | null>(null)
 
-/** Wrap subtree to provide raw parts data for rendering components. */
-export const PartsProvider = PartsContext.Provider
+type PartsMap = Record<string, CherryMessagePart[]> | null
+const EMPTY_MESSAGE_PARTS: CherryMessagePart[] = []
+interface MessagePartsScopeValue {
+  messageId: string
+  parts: CherryMessagePart[]
+}
+
+const MessagePartsScopeContext = createContext<MessagePartsScopeValue | null>(null)
+const MessageIdContext = createContext<string | undefined>(undefined)
+
+/**
+ * Provide the complete parts map. A nested message scope takes precedence for
+ * useMessageParts; resetting it here prevents an outer message scope leaking
+ * into an intentionally isolated nested provider.
+ */
+export function PartsProvider({ value, children }: { value: PartsMap; children: ReactNode }) {
+  return (
+    <PartsContext value={value}>
+      <MessagePartsScopeContext value={null}>{children}</MessagePartsScopeContext>
+    </PartsContext>
+  )
+}
+
+/** Provide one message's parts without subscribing its subtree to the complete map. */
+export function MessagePartsScopeProvider({
+  messageId,
+  parts,
+  children
+}: {
+  messageId: string
+  parts: CherryMessagePart[]
+  children: ReactNode
+}) {
+  const value = useMemo(() => ({ messageId, parts }), [messageId, parts])
+  return (
+    <MessageIdContext value={messageId}>
+      <MessagePartsScopeContext value={value}>{children}</MessagePartsScopeContext>
+    </MessageIdContext>
+  )
+}
 
 /** Read the parts map from context (null when no provider is present). */
 export function usePartsMap() {
@@ -43,6 +82,11 @@ export function usePartsMap() {
 /** Check if parts data is provided. */
 export function useHasMessageParts(): boolean {
   return use(PartsContext) !== null
+}
+
+/** Read the current message ID without subscribing to the complete parts map. */
+export function useMessagePartsScopeId(): string | undefined {
+  return use(MessageIdContext)
 }
 
 // ============================================================================
@@ -59,71 +103,18 @@ export function parseBlockId(blockId: string): { messageId: string; index: numbe
   return { messageId, index }
 }
 
-export interface TranslationOverlayEntry {
-  content: string
-  targetLanguage: TranslateLangCode
-  sourceLanguage?: TranslateLangCode
-}
-
-export const TranslationOverlayContext = createContext<Record<string, TranslationOverlayEntry> | null>(null)
-export const TranslationOverlayProvider = TranslationOverlayContext.Provider
-
-/**
- * Setter is exposed via a separate context so writers (the translation hook)
- * don't re-render when the map mutates — only readers (rendering pipeline) do.
- */
-export type TranslationOverlaySetter = (messageId: string, entry: TranslationOverlayEntry | null) => void
-export const TranslationOverlaySetterContext = createContext<TranslationOverlaySetter | null>(null)
-export const TranslationOverlaySetterProvider = TranslationOverlaySetterContext.Provider
-
-/** Read the full overlay map (null when no provider is mounted, e.g. v1 chat). */
-export function useTranslationOverlay(): Record<string, TranslationOverlayEntry> | null {
-  return use(TranslationOverlayContext)
-}
-
-/**
- * Read a single message's overlay entry. Returns undefined when no overlay is
- * active for the message (the typical case).
- */
-export function useTranslationOverlayEntry(messageId: string): TranslationOverlayEntry | undefined {
-  const map = use(TranslationOverlayContext)
-  return map?.[messageId]
-}
-
-/**
- * Imperative setter for translation hooks. Pass `null` to clear an entry.
- * Throws when called outside a `TranslationOverlaySetterProvider` — the
- * translation hook is only mounted inside `V2ChatContent`.
- */
-export function useTranslationOverlaySetter(): TranslationOverlaySetter {
-  const setter = use(TranslationOverlaySetterContext)
-  if (!setter) {
-    throw new Error('useTranslationOverlaySetter must be used inside TranslationOverlaySetterProvider')
-  }
-  return setter
-}
-
-/**
- * Non-throwing variant: returns `null` when no provider is mounted (scopes
- * that intentionally don't offer message translation, e.g. agent sessions /
- * quick-assistant). `useTranslateMessage` uses this so its menubar can render
- * in those scopes without the strict guard crashing — the strict
- * `useTranslationOverlaySetter` above is left intact for the chat path.
- */
-export function useOptionalTranslationOverlaySetter(): TranslationOverlaySetter | null {
-  return use(TranslationOverlaySetterContext)
-}
-
 /**
  * Get raw parts for a message from PartsContext.
  * Returns empty array if no parts provider exists or no parts are present.
  */
 export function useMessageParts(messageId: string): CherryMessagePart[] {
+  const scope = use(MessagePartsScopeContext)
+  if (scope?.messageId === messageId) return scope.parts
+
+  // React's `use` API may be called conditionally. Scoped message consumers
+  // therefore avoid subscribing to the complete map.
   const partsMap = use(PartsContext)
-  return useMemo(() => {
-    if (!partsMap) return []
-    return partsMap[messageId] ?? []
-  }, [partsMap, messageId])
+  return partsMap?.[messageId] ?? EMPTY_MESSAGE_PARTS
 }
 
 /**

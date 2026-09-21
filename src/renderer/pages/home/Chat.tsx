@@ -1,289 +1,333 @@
-import { dataApiService } from '@data/DataApiService'
-import { useInvalidateCache } from '@data/hooks/useDataApi'
+import type { FC, ReactNode } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+
 import { usePreference } from '@data/hooks/usePreference'
-import { loggerService } from '@logger'
-import { type ChatPanePosition, ConversationShell } from '@renderer/components/chat'
-import CitationsPanel from '@renderer/components/chat/citations/CitationsPanel'
-import type { TopicMessageFlowLiveState } from '@renderer/components/chat/messages/flow/topicMessageFlowLiveTree'
-import type { ContentSearchRef } from '@renderer/components/ContentSearch'
-import { ContentSearch } from '@renderer/components/ContentSearch'
-import PromptPopup from '@renderer/components/Popups/PromptPopup'
+import { ChatLayoutModeProvider } from '@renderer/components/chat/layout/ChatLayoutModeContext'
+import { ResourcePaneCountButton, type ResourcePaneCountButtonProps } from '@renderer/components/chat/panes/Shell'
+import ConversationCenterState from '@renderer/components/chat/shell/ConversationCenterState'
+import ConversationShell from '@renderer/components/chat/shell/ConversationShell'
+import { useConversationTopBarPortalLayout } from '@renderer/components/chat/shell/ConversationTopBarPortal'
+import type { ChatPanePosition } from '@renderer/components/chat/shell/paneLayout'
+import {
+  ChatConversationControls,
+  type ChatConversationControlsProps
+} from '@renderer/components/composer/variants/chat/ChatConversationControls'
+import type { ChatConversationControlsSnapshot } from '@renderer/components/composer/variants/ChatComposer'
+import PromptPopup from '@renderer/components/popups/PromptPopup'
+import { useClearTopicMessages } from '@renderer/hooks/chat/useClearTopicMessages'
 import { useCommandHandler } from '@renderer/hooks/command'
-import { useTimer } from '@renderer/hooks/useTimer'
+import { useIsActiveTab } from '@renderer/hooks/tab'
+import { useAssistant } from '@renderer/hooks/useAssistant'
+import { useProviders } from '@renderer/hooks/useProvider'
 import { useTopicMutations } from '@renderer/hooks/useTopic'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
+import { popup } from '@renderer/services/popup'
+import { toast } from '@renderer/services/toast'
+import type { ConversationCenterSlot, PaneManualToggleSignal } from '@renderer/types/conversationLayout'
 import type { Citation } from '@renderer/types/message'
 import type { Topic } from '@renderer/types/topic'
-import type { FC, ReactNode } from 'react'
-import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { useHotkeys } from 'react-hotkeys-hook'
-import { useTranslation } from 'react-i18next'
+import { formatErrorMessageWithPrefix } from '@renderer/utils/error'
 
 import ChatContent from './ChatContent'
 import ChatNavbar from './components/ChatNavbar'
 import { TopicRightPane, useTopicBranchLiveStateSetter } from './components/TopicRightPane'
 import type { AddNewTopicPayload } from './types'
 
-const logger = loggerService.withContext('Chat')
+const CitationsPanel = React.lazy(() => import('@renderer/components/chat/citations/CitationsPanel'))
+
+const EMPTY_MODELS: ChatConversationControlsSnapshot['mentionedModels'] = []
+const NOOP_MODEL_SELECT: ChatConversationControlsSnapshot['onModelSelect'] = () => undefined
+const NOOP_MODELS_SELECT: ChatConversationControlsSnapshot['onMentionedModelsSelect'] = () => undefined
+const NOOP_MULTI_SELECT_MODE_CHANGE: ChatConversationControlsSnapshot['onMentionedModelMultiSelectModeChange'] = () =>
+  undefined
+const NOOP_MODEL_SELECTOR_RESTORE: ChatConversationControlsSnapshot['onMentionedModelSelectorRestore'] = () => undefined
+
+type ChatTopBarControlsProps = Omit<ChatConversationControlsProps, 'iconOnly' | 'side'>
+
+function ChatTopBarControls(props: ChatTopBarControlsProps) {
+  const { iconOnly } = useConversationTopBarPortalLayout()
+
+  return <ChatConversationControls {...props} side="bottom" iconOnly={iconOnly} />
+}
 
 interface Props {
-  activeTopic: Topic
+  activeTopic?: Topic
+  /** The entry topic is still resolving — hold the loading center instead of the empty one. */
+  topicPending?: boolean
+  centerSurface?: ConversationCenterSlot | null
   pane?: ReactNode
   paneOpen?: boolean
   panePosition?: ChatPanePosition
   onNewTopic?: (payload?: AddNewTopicPayload) => void | Promise<void>
+  onCreateEmptyTopic?: (payload?: AddNewTopicPayload) => void | Promise<void>
   showResourceListControls?: boolean
   sidebarOpen?: boolean
   onSidebarToggle?: () => void
   locateMessageId?: string
   onLocateMessageHandled?: () => void
   onPaneCollapse?: () => void
+  onPaneAutoCollapseChange?: (collapsed: boolean) => void
+  paneManualToggle?: PaneManualToggleSignal
+  resourcePaneCount?: ResourcePaneCountButtonProps
 }
 
-const ChatInner: FC<Props> = (props) => {
+interface CitationPanelState {
+  topicId: string
+  citations: Citation[]
+}
+
+const Chat: FC<Props> = (props) => {
   const { updateTopic: patchTopic } = useTopicMutations()
+  const clearTopicMessages = useClearTopicMessages()
   const { t } = useTranslation()
   const [messageStyle] = usePreference('chat.message.style')
-  const invalidateCache = useInvalidateCache()
-  const [citationPanelCitations, setCitationPanelCitations] = useState<Citation[] | null>(null)
+  const [topicDisplayMode] = usePreference('topic.tab.display_mode')
+  const [citationPanelState, setCitationPanelState] = useState<CitationPanelState | null>(null)
+  const [shouldMountCitationsPanel, setShouldMountCitationsPanel] = useState(false)
   const [branchLocateMessageId, setBranchLocateMessageId] = useState<string | undefined>()
   const setTopicBranchLiveState = useTopicBranchLiveStateSetter()
-  const branchDraftAnchorIdRef = useRef<string | null>(null)
-  const branchSendAnchorOverrideIdRef = useRef<string | null>(null)
 
   const mainRef = React.useRef<HTMLDivElement>(null)
-  const contentSearchRef = useRef<ContentSearchRef>(null)
-  const [filterIncludeUser, setFilterIncludeUser] = useState(false)
-  const { setTimeoutTimer } = useTimer()
+  const activeTopic = props.activeTopic
+  const centerSurface = props.centerSurface
+  const showConversation = Boolean(activeTopic && !centerSurface)
+  const isActiveTab = useIsActiveTab()
+  const showConversationChrome = !centerSurface
+  const activeTopicId = activeTopic?.id
+  const citationPanelCitations =
+    citationPanelState && citationPanelState.topicId === activeTopicId ? citationPanelState.citations : null
+  const assistantContext = useAssistant(activeTopic?.assistantId, {
+    loadDefaultModel: Boolean(activeTopic)
+  })
+  const [conversationControlsSnapshot, setConversationControlsSnapshot] =
+    useState<ChatConversationControlsSnapshot | null>(null)
+  const activeConversationControlsSnapshot =
+    conversationControlsSnapshot?.scopeKey === activeTopicId ? conversationControlsSnapshot : null
+  // Provider metadata supplies the user-facing name for both the single-model trigger and
+  // selected-model details. Model entities only carry the provider id.
+  const shouldLoadProviders = Boolean(
+    activeTopic &&
+    (assistantContext.model ||
+      (activeConversationControlsSnapshot &&
+        (activeConversationControlsSnapshot.mentionedModels.length > 0 ||
+          activeConversationControlsSnapshot.mentionedModelSelectorValue.length > 0 ||
+          activeConversationControlsSnapshot.lockedMentionedModels.length > 0)))
+  )
+  const { providers } = useProviders(undefined, { enabled: shouldLoadProviders })
+  const locateMessageIdProp = props.locateMessageId
+  const onLocateMessageHandledProp = props.onLocateMessageHandled
 
   useEffect(() => {
-    branchDraftAnchorIdRef.current = null
-    branchSendAnchorOverrideIdRef.current = null
-    setTopicBranchLiveState(props.activeTopic.id, null)
+    setCitationPanelState(null)
+  }, [activeTopicId])
+
+  useEffect(() => {
     setBranchLocateMessageId(undefined)
+    if (!activeTopicId) return
+
+    setTopicBranchLiveState(activeTopicId, null)
     return () => {
-      branchDraftAnchorIdRef.current = null
-      branchSendAnchorOverrideIdRef.current = null
-      setTopicBranchLiveState(props.activeTopic.id, null)
+      setTopicBranchLiveState(activeTopicId, null)
     }
-  }, [props.activeTopic.id, setTopicBranchLiveState])
+  }, [activeTopicId, setTopicBranchLiveState])
 
-  useHotkeys('esc', () => {
-    contentSearchRef.current?.disable()
-  })
+  useCommandHandler(
+    'topic.rename',
+    async () => {
+      if (!showConversation) return
 
-  useCommandHandler('chat.message.search', () => {
-    try {
-      const selectedText = window.getSelection()?.toString().trim()
-      contentSearchRef.current?.enable(selectedText)
-    } catch (error) {
-      logger.error('Error enabling content search:', error as Error)
-    }
-  })
+      const topic = activeTopic
+      if (!topic) return
 
-  useCommandHandler('topic.rename', async () => {
-    const topic = props.activeTopic
-    if (!topic) return
-
-    const name = await PromptPopup.show({
-      title: t('chat.topics.edit.title'),
-      message: '',
-      defaultValue: topic.name || '',
-      extraNode: <div className="mt-2 text-foreground-secondary">{t('chat.topics.edit.title_tip')}</div>
-    })
-    if (name && topic.name !== name) {
-      await patchTopic(topic.id, { name, isNameManuallyEdited: true })
-    }
-  })
-
-  const contentSearchFilter: NodeFilter = {
-    acceptNode(node) {
-      const container = node.parentElement?.closest('.message-content-container')
-      if (!container) return NodeFilter.FILTER_REJECT
-      const message = container.closest('.message')
-      if (!message) return NodeFilter.FILTER_REJECT
-      if (filterIncludeUser) return NodeFilter.FILTER_ACCEPT
-      if (message.classList.contains('message-assistant')) return NodeFilter.FILTER_ACCEPT
-      return NodeFilter.FILTER_REJECT
-    }
-  }
-
-  const userOutlinedItemClickHandler = () => {
-    setFilterIncludeUser(!filterIncludeUser)
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        setTimeoutTimer(
-          'userOutlinedItemClickHandler',
-          () => {
-            contentSearchRef.current?.search()
-            contentSearchRef.current?.focus()
-          },
-          0
-        )
+      const name = await PromptPopup.show({
+        title: t('chat.topics.edit.title'),
+        message: '',
+        defaultValue: topic.name || '',
+        extraNode: <div className="mt-2 text-muted-foreground">{t('chat.topics.edit.title_tip')}</div>
       })
-    })
-  }
+      if (name && topic.name !== name) {
+        await patchTopic(topic.id, { name, isNameManuallyEdited: true })
+      }
+    },
+    { enabled: showConversation }
+  )
+  useCommandHandler(
+    'topic.clear_messages',
+    async () => {
+      if (!activeTopic) return
+      const confirmed = await popup.confirm({
+        title: t('chat.input.clear.title'),
+        content: t('chat.input.clear.content'),
+        autoFocusConfirm: true,
+        centered: true
+      })
+      if (!confirmed) return
+      try {
+        await clearTopicMessages(activeTopic.id)
+      } catch (error) {
+        toast.error(formatErrorMessageWithPrefix(error, t('message.error.unknown')))
+      }
+    },
+    { enabled: showConversation && isActiveTab }
+  )
 
   const citationsPanelOpen = citationPanelCitations !== null
 
-  const handleOpenCitationsPanel = useCallback(({ citations }: { citations: Citation[] }) => {
-    setCitationPanelCitations(citations)
-  }, [])
+  const handleOpenCitationsPanel = useCallback(
+    ({ citations }: { citations: Citation[] }) => {
+      if (!activeTopicId) return
+      setShouldMountCitationsPanel(true)
+      setCitationPanelState({ topicId: activeTopicId, citations })
+    },
+    [activeTopicId]
+  )
+  const handleAssistantChange = useCallback(
+    async (nextAssistantId: string | null) => {
+      if (!activeTopic || !nextAssistantId || nextAssistantId === activeTopic.assistantId) return
+      await patchTopic(activeTopic.id, { assistantId: nextAssistantId })
+    },
+    [activeTopic, patchTopic]
+  )
+  const handleRestoreComposerFocus = useCallback(() => {
+    if (!activeTopicId) return
+    void EventEmitter.emit(EVENT_NAMES.FOCUS_CHAT_COMPOSER, { topicId: activeTopicId })
+  }, [activeTopicId])
 
   const handleBranchLiveStateChange = useCallback(
     (state: Parameters<typeof setTopicBranchLiveState>[1]) => {
-      setTopicBranchLiveState(state?.topicId ?? props.activeTopic.id, state)
+      const topicId = state?.topicId ?? activeTopicId
+      if (topicId) setTopicBranchLiveState(topicId, state)
     },
-    [props.activeTopic.id, setTopicBranchLiveState]
+    [activeTopicId, setTopicBranchLiveState]
   )
-  const getBranchDraftAnchorId = useCallback(
-    () => branchDraftAnchorIdRef.current ?? branchSendAnchorOverrideIdRef.current,
-    []
-  )
-  const clearBranchDraft = useCallback(() => {
-    branchDraftAnchorIdRef.current = null
-    branchSendAnchorOverrideIdRef.current = null
-  }, [])
-  const handleCancelBranchDraft = useCallback(
-    (nextActiveNodeId?: string | null) => {
-      branchDraftAnchorIdRef.current = null
-      branchSendAnchorOverrideIdRef.current = nextActiveNodeId ?? null
-
-      if (nextActiveNodeId === undefined) {
-        setTopicBranchLiveState(props.activeTopic.id, null)
-        return
-      }
-
-      setTopicBranchLiveState(props.activeTopic.id, {
-        topicId: props.activeTopic.id,
-        activeNodeId: nextActiveNodeId,
-        nodes: []
-      })
-    },
-    [props.activeTopic.id, setTopicBranchLiveState]
-  )
-  const handleStartBranchDraft = useCallback(
-    async (anchorMessageId: string) => {
-      await dataApiService.put(`/topics/${props.activeTopic.id}/active-node`, {
-        body: { nodeId: anchorMessageId }
-      })
-
-      branchDraftAnchorIdRef.current = anchorMessageId
-      branchSendAnchorOverrideIdRef.current = null
-      const draftNodeId = `branch-draft:${anchorMessageId}`
-      const draftState: TopicMessageFlowLiveState = {
-        topicId: props.activeTopic.id,
-        activeNodeId: draftNodeId,
-        nodes: [
-          {
-            id: draftNodeId,
-            parentId: anchorMessageId,
-            role: 'user',
-            preview: t('chat.message.flow.status.awaiting_input'),
-            modelId: null,
-            status: 'paused',
-            createdAt: new Date().toISOString(),
-            isInputDraft: true
-          }
-        ]
-      }
-
-      setTopicBranchLiveState(props.activeTopic.id, draftState)
-      void EventEmitter.emit(EVENT_NAMES.FOCUS_CHAT_COMPOSER, { topicId: props.activeTopic.id })
-      await invalidateCache(`/topics/${props.activeTopic.id}/messages`)
-    },
-    [invalidateCache, props.activeTopic.id, setTopicBranchLiveState, t]
-  )
-  const branchPaneDisabled = false
-  const locateMessageId = props.locateMessageId ?? branchLocateMessageId
+  const locateMessageId = locateMessageIdProp ?? branchLocateMessageId
   const handleLocateMessageHandled = useCallback(() => {
     setBranchLocateMessageId(undefined)
-    if (props.locateMessageId) {
-      props.onLocateMessageHandled?.()
+    if (locateMessageIdProp) {
+      onLocateMessageHandledProp?.()
     }
-  }, [props.locateMessageId, props.onLocateMessageHandled])
+  }, [locateMessageIdProp, onLocateMessageHandledProp])
+  const centerContent =
+    centerSurface?.content ??
+    (activeTopic ? (
+      <ChatContent
+        key={activeTopic.id}
+        topic={activeTopic}
+        onOpenCitationsPanel={handleOpenCitationsPanel}
+        onNewTopic={props.onNewTopic}
+        onCreateEmptyTopic={props.onCreateEmptyTopic}
+        locateMessageId={locateMessageId}
+        onLocateMessageHandled={handleLocateMessageHandled}
+        onBranchLiveStateChange={handleBranchLiveStateChange}
+        assistantContext={assistantContext}
+        providers={providers}
+        onConversationControlsChange={setConversationControlsSnapshot}
+      />
+    ) : (
+      // Nothing left to resolve and still no topic: the library is genuinely empty, so settle on
+      // the empty center rather than spinning forever. Same split as AgentChat.
+      <ConversationCenterState state={props.topicPending ? 'loading' : 'empty'} />
+    ))
+  // ChatContent is keyed by topic; keep width-derived layout state outside that remount boundary.
+  const center = <ChatLayoutModeProvider>{centerContent}</ChatLayoutModeProvider>
 
   return (
     <ConversationShell
       id="chat"
-      className={messageStyle}
+      className={activeTopic || centerSurface ? messageStyle : undefined}
       pane={props.pane}
       paneOpen={props.paneOpen}
       panePosition={props.panePosition}
       onPaneCollapse={props.onPaneCollapse}
+      onPaneAutoCollapseChange={props.onPaneAutoCollapseChange}
+      paneManualToggle={props.paneManualToggle}
       topBar={
-        <ChatNavbar
-          showSidebarControls={props.showResourceListControls}
-          sidebarOpen={props.sidebarOpen}
-          onSidebarToggle={props.onSidebarToggle}
-        />
+        showConversationChrome ? (
+          <ChatNavbar
+            conversationControls={
+              activeTopic ? (
+                <ChatTopBarControls
+                  assistantId={assistantContext.assistant?.id ?? null}
+                  assistantName={
+                    assistantContext.assistant?.name ??
+                    (assistantContext.isLoading ? t('common.loading') : t('button.select_assistant'))
+                  }
+                  assistantEmoji={assistantContext.assistant?.emoji}
+                  model={assistantContext.model}
+                  modelPending={
+                    assistantContext.isLoading || assistantContext.isModelPending || !activeConversationControlsSnapshot
+                  }
+                  providers={providers}
+                  mentionedModels={activeConversationControlsSnapshot?.mentionedModels ?? EMPTY_MODELS}
+                  mentionedModelSelectorValue={
+                    activeConversationControlsSnapshot?.mentionedModelSelectorValue ??
+                    (assistantContext.model ? [assistantContext.model] : EMPTY_MODELS)
+                  }
+                  lockedMentionedModels={activeConversationControlsSnapshot?.lockedMentionedModels ?? EMPTY_MODELS}
+                  mentionedModelMultiSelectMode={
+                    activeConversationControlsSnapshot?.mentionedModelMultiSelectMode ?? false
+                  }
+                  selectModelLabel={assistantContext.isModelPending ? t('common.loading') : t('button.select_model')}
+                  useMentionedModelSelector
+                  shouldAutoSelectCreatedAssistant={false}
+                  assistantTriggerAction={topicDisplayMode === 'assistant' ? 'edit' : 'select'}
+                  onDialogCloseAutoFocus={handleRestoreComposerFocus}
+                  onAssistantChange={handleAssistantChange}
+                  onModelSelect={activeConversationControlsSnapshot?.onModelSelect ?? NOOP_MODEL_SELECT}
+                  onMentionedModelsSelect={
+                    activeConversationControlsSnapshot?.onMentionedModelsSelect ?? NOOP_MODELS_SELECT
+                  }
+                  onMentionedModelMultiSelectModeChange={
+                    activeConversationControlsSnapshot?.onMentionedModelMultiSelectModeChange ??
+                    NOOP_MULTI_SELECT_MODE_CHANGE
+                  }
+                  onMentionedModelSelectorRestore={
+                    activeConversationControlsSnapshot?.onMentionedModelSelectorRestore ?? NOOP_MODEL_SELECTOR_RESTORE
+                  }
+                />
+              ) : undefined
+            }
+            showSidebarControls={props.showResourceListControls}
+            sidebarOpen={props.sidebarOpen}
+            onSidebarToggle={props.onSidebarToggle}
+          />
+        ) : undefined
       }
-      topRightTool={<TopicRightPane.Toggle disabled={branchPaneDisabled} />}
+      topRightTool={
+        showConversation ? (
+          <>
+            {props.resourcePaneCount && <ResourcePaneCountButton {...props.resourcePaneCount} />}
+            <TopicRightPane.Shortcuts
+              browserEnabled={
+                !!assistantContext.assistant && assistantContext.assistant.settings.enableBrowser !== false
+              }
+            />
+          </>
+        ) : undefined
+      }
+      showTopRightToolWhenPaneOpen
       sidePanel={
-        <CitationsPanel
-          open={citationsPanelOpen}
-          onClose={() => setCitationPanelCitations(null)}
-          citations={citationPanelCitations ?? []}
-        />
-      }
-      center={
-        <ChatContent
-          key={props.activeTopic.id}
-          topic={props.activeTopic}
-          onOpenCitationsPanel={handleOpenCitationsPanel}
-          onNewTopic={props.onNewTopic}
-          locateMessageId={locateMessageId}
-          onLocateMessageHandled={handleLocateMessageHandled}
-          onBranchLiveStateChange={handleBranchLiveStateChange}
-          clearBranchDraft={clearBranchDraft}
-          getBranchDraftAnchorId={getBranchDraftAnchorId}
-        />
-      }
-      centerTopOverlay={
-        <ContentSearch
-          ref={contentSearchRef}
-          searchTarget={mainRef as React.RefObject<HTMLElement>}
-          filter={contentSearchFilter}
-          includeUser={filterIncludeUser}
-          onIncludeUserChange={userOutlinedItemClickHandler}
-          positionMode="absolute"
-        />
-      }
-      centerOverlay={
-        !branchPaneDisabled ? (
-          <TopicRightPane.MaximizedOverlay
-            topicId={props.activeTopic.id}
-            topicName={props.activeTopic.name}
-            traceId={props.activeTopic.traceId}
-            onLocateMessage={setBranchLocateMessageId}
-            onStartBranchDraft={handleStartBranchDraft}
-            onCancelBranchDraft={handleCancelBranchDraft}
-          />
+        showConversation && shouldMountCitationsPanel ? (
+          <React.Suspense fallback={null}>
+            <CitationsPanel
+              open={citationsPanelOpen}
+              onClose={() => setCitationPanelState(null)}
+              citations={citationPanelCitations ?? []}
+            />
+          </React.Suspense>
         ) : undefined
       }
-      rightPane={
-        !branchPaneDisabled ? (
-          <TopicRightPane.Host
-            topicId={props.activeTopic.id}
-            topicName={props.activeTopic.name}
-            traceId={props.activeTopic.traceId}
-            onLocateMessage={setBranchLocateMessageId}
-            onStartBranchDraft={handleStartBranchDraft}
-            onCancelBranchDraft={handleCancelBranchDraft}
-          />
-        ) : undefined
+      center={center}
+      rightPane={<TopicRightPane.Viewport onLocateMessage={setBranchLocateMessageId} />}
+      centerId={centerSurface?.id ?? (showConversation ? 'chat-main' : undefined)}
+      centerRef={centerSurface?.ref ?? (showConversation ? mainRef : undefined)}
+      centerClassName={
+        centerSurface?.className ??
+        (showConversation ? 'transform-[translateZ(0)] relative justify-between' : undefined)
       }
-      centerId="chat-main"
-      centerRef={mainRef}
-      centerClassName="transform-[translateZ(0)] relative justify-between"
     />
   )
 }
-
-const Chat: FC<Props> = (props) => (
-  <TopicRightPane>
-    <ChatInner {...props} />
-  </TopicRightPane>
-)
 
 export default Chat
