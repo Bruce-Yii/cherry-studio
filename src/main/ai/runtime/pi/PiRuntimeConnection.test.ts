@@ -341,7 +341,7 @@ beforeEach(() => {
         agent,
         session,
         provider: { id: 'p' },
-        model: { id: 'p::m' },
+        model: { id: modelId, name: agent.modelName },
         enabledApiKeys: [{ id: 'key-1', key: 'real-key', isEnabled: true }],
         additionalSkillPaths: skills
           .filter((skill: { isEnabled: boolean }) => skill.isEnabled)
